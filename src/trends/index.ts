@@ -1,17 +1,20 @@
 /**
- * Trends tabs, wired into the YouTube TV page:
- * - the guide (left menu) gets "Тренды: мир" and "Тренды: Европа" and loses
- *   movies, games and sports (JSON.parse hook, like adblock.js);
- * - opening a tab sends the browse request for a real page instead (the TV
- *   app loads pages over XHR, not fetch) and swaps that page's contents for
- *   shelves built from the Data API `mostPopular` chart of several countries.
+ * Trends, wired into the YouTube TV page:
+ * - the guide (left menu) gets "Тренды" and loses movies, games and sports
+ *   (JSON.parse hook, like adblock.js);
+ * - opening it, or a country in its top row, sends the browse request for a
+ *   real page instead (the TV app loads pages over XHR, not fetch) and swaps
+ *   that page's contents for shelves built from the Data API `mostPopular`
+ *   chart of that country, or of several merged (world, Europe).
  */
+import { ResolveCommandRegistry } from '../app_api';
 import {
   groupIntoShelves,
   patchGuide,
   rankAcrossRegions,
   swapBrowseContents,
-  trendsTabOf,
+  toRememberedCountry,
+  trendsRequestOf,
   videoFromApi,
   withCarrier,
   type RankedVideo,
@@ -22,13 +25,36 @@ import {
 
 const REGIONS: Record<TrendsTab, string[]> = {
   world: ['US', 'GB', 'IN', 'BR', 'JP', 'KR', 'MX', 'DE', 'FR', 'ID'],
-  europe: ['DE', 'FR', 'GB', 'IT', 'ES', 'PL', 'NL', 'SE', 'UA', 'LV']
+  europe: ['DE', 'FR', 'GB', 'IT', 'ES', 'PL', 'NL', 'SE', 'UA', 'LV'],
+  ru: ['RU'],
+  lv: ['LV'],
+  us: ['US']
 };
 
 const FRESH_MS = 3 * 60 * 60 * 1000;
 const STORAGE_PREFIX = 'ytaf-trends-';
 
+const LAST_TAB_KEY = `${STORAGE_PREFIX}last`;
+
 let carrierBrowseId = 'FEtopics';
+
+function rememberedTab(): TrendsTab {
+  try {
+    const tab = localStorage.getItem(LAST_TAB_KEY);
+    if (tab && tab in REGIONS) return tab as TrendsTab;
+  } catch {
+    // Blocked storage: fall back to the world.
+  }
+  return 'world';
+}
+
+function rememberTab(tab: TrendsTab) {
+  try {
+    localStorage.setItem(LAST_TAB_KEY, tab);
+  } catch {
+    // Not remembered; the next open shows the world.
+  }
+}
 
 // ------------------------------------------------------------------ the data
 
@@ -117,9 +143,8 @@ JSON.parse = function (...args: Parameters<typeof JSON.parse>) {
     if (homeBrowseId) carrierBrowseId = homeBrowseId;
     if (patched) {
       console.info('[trends] Guide patched, carrier', carrierBrowseId);
-      // Warm both tabs so the first open is instant.
-      void loadShelves('world');
-      void loadShelves('europe');
+      // Warm the country shown first, so opening Trends is instant.
+      void loadShelves(rememberedTab());
     }
   }
   return r;
@@ -144,15 +169,17 @@ proto.send = function (
   this: TrackedXhr,
   body?: Document | XMLHttpRequestBodyInit | null
 ) {
-  const tab =
+  const request =
     typeof body === 'string' &&
     this.__ytafTrendsUrl?.includes('/youtubei/v1/browse')
-      ? trendsTabOf(body)
+      ? trendsRequestOf(body)
       : null;
-  if (!tab || typeof body !== 'string') {
+  if (!request || typeof body !== 'string') {
     origSend.call(this, body);
     return;
   }
+  const tab = request === 'remembered' ? rememberedTab() : request;
+  rememberTab(tab);
 
   const xhr = this;
   void loadShelves(tab).then((shelves) => {
@@ -163,7 +190,7 @@ proto.send = function (
         try {
           swapped =
             xhr.status === 200
-              ? swapBrowseContents(real, shelves, new Date())
+              ? swapBrowseContents(real, tab, shelves, new Date())
               : real;
         } catch (err) {
           console.warn(
@@ -193,3 +220,13 @@ proto.send = function (
     origSend.call(xhr, withCarrier(body, carrierBrowseId));
   });
 };
+
+// ------------------------------------------------------- the guide entry
+
+void ResolveCommandRegistry.getInstance().then((registry) => {
+  registry.setHook('browseEndpoint', (resolveCommand, payload, extra) => {
+    const rewritten = toRememberedCountry(payload, rememberedTab());
+    if (rewritten) console.info('[trends] Guide entry ->', rewritten);
+    return resolveCommand(rewritten ?? payload, extra);
+  });
+});

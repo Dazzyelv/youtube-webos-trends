@@ -1,12 +1,13 @@
 /**
  * Trends tabs: everything that does not touch the browser, so it can be
- * tested under node. YouTube retired its Trending page in July 2025; these
- * tabs are rebuilt from the Data API `mostPopular` chart of several countries.
+ * tested under node. YouTube retired its Trending page in July 2025; this
+ * page is rebuilt from the Data API `mostPopular` chart: one country, or
+ * several merged (world, Europe).
  *
  * This file must not import anything at runtime (the tests load it directly).
  */
 
-export type TrendsTab = 'world' | 'europe';
+export type TrendsTab = 'world' | 'europe' | 'ru' | 'lv' | 'us';
 
 export type TrendVideo = {
   id: string;
@@ -23,12 +24,19 @@ export type RankedVideo = TrendVideo & { score: number; countries: number };
 
 export type Shelf = { title: string; videos: RankedVideo[] };
 
-export const TAB_BROWSE_PREFIX = 'FEytaf_trends_';
+/** The guide entry opens the country chosen last; each country has its own id. */
+export const TRENDS_BROWSE_ID = 'FEytaf_trends';
 
-const TABS: { tab: TrendsTab; title: string; icon: string }[] = [
-  { tab: 'world', title: 'Тренды: мир', icon: 'WHATS_HOT' },
-  { tab: 'europe', title: 'Тренды: Европа', icon: 'TRENDING' }
-];
+/** In the order the country row shows them. */
+export const TAB_TITLES: Record<TrendsTab, string> = {
+  world: 'Мир',
+  europe: 'Европа',
+  ru: 'Россия',
+  lv: 'Латвия',
+  us: 'США'
+};
+
+const TAB_IDS = Object.keys(TAB_TITLES) as TrendsTab[];
 
 const HIDDEN_BROWSE_IDS = [
   'FEtopics_movies',
@@ -234,6 +242,78 @@ function buildTile(v: RankedVideo, now: Date) {
   };
 }
 
+// Flags as inline SVG, 16:9 like a video thumbnail; no image host needed.
+const star = (cx: number, cy: number, r: number) =>
+  Array.from({ length: 10 }, (_, i) => {
+    const a = (-90 + i * 36) * (Math.PI / 180);
+    const d = i % 2 === 0 ? r : r * 0.4;
+    return `${(cx + d * Math.cos(a)).toFixed(1)},${(cy + d * Math.sin(a)).toFixed(1)}`;
+  }).join(' ');
+
+const FLAGS: Record<TrendsTab, string> = {
+  world:
+    '<rect width="160" height="90" fill="#0b3d91"/>' +
+    '<g fill="none" stroke="#fff" stroke-width="2.5">' +
+    '<circle cx="80" cy="45" r="32" fill="#1a73e8"/>' +
+    '<ellipse cx="80" cy="45" rx="14" ry="32"/>' +
+    '<path d="M48 45H112M53 29H107M53 61H107"/></g>',
+  europe:
+    '<rect width="160" height="90" fill="#003399"/>' +
+    Array.from({ length: 12 }, (_, i) => {
+      const a = (i * 30 * Math.PI) / 180;
+      return `<polygon fill="#fc0" points="${star(80 + 27 * Math.sin(a), 45 - 27 * Math.cos(a), 5)}"/>`;
+    }).join(''),
+  ru:
+    '<rect width="160" height="30" fill="#fff"/>' +
+    '<rect y="30" width="160" height="30" fill="#0039a6"/>' +
+    '<rect y="60" width="160" height="30" fill="#d52b1e"/>',
+  lv:
+    '<rect width="160" height="90" fill="#9e3039"/>' +
+    '<rect y="36" width="160" height="18" fill="#fff"/>',
+  us:
+    Array.from(
+      { length: 13 },
+      (_, i) =>
+        `<rect y="${((i * 90) / 13).toFixed(2)}" width="160" height="${(90 / 13).toFixed(2)}" fill="${i % 2 ? '#fff' : '#b22234'}"/>`
+    ).join('') +
+    '<rect width="64" height="48.5" fill="#3c3b6e"/>' +
+    Array.from(
+      { length: 30 },
+      (_, i) =>
+        `<circle cx="${6 + (i % 6) * 10.4}" cy="${5 + Math.floor(i / 6) * 9.6}" r="1.8" fill="#fff"/>`
+    ).join('')
+};
+
+export function flagImage(tab: TrendsTab): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90">${FLAGS[tab]}</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function buildCountryTile(tab: TrendsTab, selected: boolean) {
+  return {
+    tileRenderer: {
+      style: 'TILE_STYLE_YTLR_DEFAULT',
+      header: {
+        tileHeaderRenderer: {
+          thumbnail: {
+            thumbnails: [{ url: flagImage(tab), width: 480, height: 270 }]
+          }
+        }
+      },
+      metadata: {
+        tileMetadataRenderer: {
+          title: text(TAB_TITLES[tab]),
+          lines: selected ? [line(text('выбрано'))] : []
+        }
+      },
+      onSelectCommand: {
+        browseEndpoint: { browseId: `${TRENDS_BROWSE_ID}_${tab}` }
+      },
+      contentType: 'TILE_CONTENT_TYPE_UNSPECIFIED'
+    }
+  };
+}
+
 function buildShelf(title: string, subtitle: string, items: object[]) {
   return {
     shelfRenderer: {
@@ -259,21 +339,31 @@ function buildShelf(title: string, subtitle: string, items: object[]) {
   };
 }
 
-/** The `contents` of a browse response: our shelves, or an error message. */
+/**
+ * The `contents` of a browse response: the country row, then the chosen
+ * country's shelves or the reason there are none.
+ */
 export function buildBrowseContents(
+  tab: TrendsTab,
   shelvesOrError: Shelf[] | string,
   now: Date
 ) {
-  const shelves =
+  const countries = buildShelf(
+    'Страна',
+    'Выберите, чьи тренды показать',
+    TAB_IDS.map((t) => buildCountryTile(t, t === tab))
+  );
+  const rest =
     typeof shelvesOrError === 'string'
       ? [buildShelf('Не удалось загрузить тренды', shelvesOrError, [])]
       : shelvesOrError.map((s) =>
           buildShelf(
-            s.title,
+            s.title === 'Топ' ? `Топ: ${TAB_TITLES[tab]}` : s.title,
             `${s.videos.length} видео`,
             s.videos.map((v) => buildTile(v, now))
           )
         );
+  const shelves = [countries, ...rest];
   return {
     tvBrowseRenderer: {
       content: {
@@ -287,15 +377,37 @@ export function buildBrowseContents(
 
 // ------------------------------------------------------ requests and guide
 
-export function trendsTabOf(requestBody: string): TrendsTab | null {
-  const m = /"browseId"\s*:\s*"FEytaf_trends_(world|europe)"/.exec(requestBody);
-  return m ? (m[1] as TrendsTab) : null;
+/** Which trends page a browse request asks for; `remembered` = the guide entry. */
+export function trendsRequestOf(
+  requestBody: string
+): TrendsTab | 'remembered' | null {
+  const m = /"browseId"\s*:\s*"FEytaf_trends(?:_(\w+))?"/.exec(requestBody);
+  if (!m) return null;
+  if (m[1] === undefined) return 'remembered';
+  return (TAB_IDS as string[]).includes(m[1]) ? (m[1] as TrendsTab) : null;
+}
+
+/**
+ * The TV app caches a page per browse id, so the guide entry would always
+ * show the country it opened first. Its command is therefore rewritten, at
+ * the moment it is chosen, into the remembered country's own page.
+ */
+export function toRememberedCountry(
+  command: Record<string, unknown>,
+  tab: TrendsTab
+): Record<string, unknown> | null {
+  const browse = command.browseEndpoint as { browseId?: unknown } | undefined;
+  if (browse?.browseId !== TRENDS_BROWSE_ID) return null;
+  return {
+    ...command,
+    browseEndpoint: { ...browse, browseId: `${TRENDS_BROWSE_ID}_${tab}` }
+  };
 }
 
 /** The same request, asking for a real page we then fill with our shelves. */
 export function withCarrier(requestBody: string, carrierBrowseId: string) {
   return requestBody.replace(
-    /"browseId"\s*:\s*"FEytaf_trends_\w+"/,
+    /"browseId"\s*:\s*"FEytaf_trends(?:_\w+)?"/,
     `"browseId":"${carrierBrowseId}"`
   );
 }
@@ -305,6 +417,7 @@ const JSON_PREFIX = ")]}'\n";
 /** The real response with its `contents` replaced; everything else kept. */
 export function swapBrowseContents(
   realText: string,
+  tab: TrendsTab,
   shelvesOrError: Shelf[] | string,
   now: Date
 ): string {
@@ -313,7 +426,7 @@ export function swapBrowseContents(
     string,
     unknown
   >;
-  real.contents = buildBrowseContents(shelvesOrError, now);
+  real.contents = buildBrowseContents(tab, shelvesOrError, now);
   return prefix + JSON.stringify(real);
 }
 
@@ -328,7 +441,7 @@ const browseIdOf = (e: GuideEntry) =>
   e?.guideEntryRenderer?.navigationEndpoint?.browseEndpoint?.browseId;
 
 /**
- * Adds both trends tabs after Home and drops the hidden topics. Returns the
+ * Adds the Trends entry after Home and drops the hidden topics. Returns the
  * Home browse id: a page this account can surely open, used as the carrier.
  */
 export function patchGuide(guide: unknown): {
@@ -357,21 +470,14 @@ export function patchGuide(guide: unknown): {
     );
     if (home === -1) continue;
     homeBrowseId = browseIdOf(section.items[home]!) ?? null;
-    if (section.items.some((e) => browseIdOf(e)?.startsWith(TAB_BROWSE_PREFIX)))
-      continue;
-    section.items.splice(
-      home + 1,
-      0,
-      ...TABS.map(({ tab, title, icon }) => ({
-        guideEntryRenderer: {
-          navigationEndpoint: {
-            browseEndpoint: { browseId: TAB_BROWSE_PREFIX + tab }
-          },
-          icon: { iconType: icon },
-          formattedTitle: { simpleText: title }
-        }
-      }))
-    );
+    if (section.items.some((e) => browseIdOf(e) === TRENDS_BROWSE_ID)) continue;
+    section.items.splice(home + 1, 0, {
+      guideEntryRenderer: {
+        navigationEndpoint: { browseEndpoint: { browseId: TRENDS_BROWSE_ID } },
+        icon: { iconType: 'WHATS_HOT' },
+        formattedTitle: { simpleText: 'Тренды' }
+      }
+    } as GuideEntry);
   }
   return { patched: true, homeBrowseId };
 }
