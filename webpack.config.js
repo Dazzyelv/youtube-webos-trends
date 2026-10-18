@@ -107,7 +107,8 @@ const makeConfig = (_env, argv) => [
         }
       }),
       new webpack.DefinePlugin({
-        __YTAF_VERSION__: JSON.stringify(pkgJson.version)
+        __YTAF_VERSION__: JSON.stringify(pkgJson.version),
+        __YTAF_TRENDS_KEY__: JSON.stringify(process.env.YTAF_TRENDS_KEY ?? '')
       })
     ]
   }
