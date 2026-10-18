@@ -9,6 +9,7 @@ import {
   formatDuration,
   formatSubscribers,
   formatViews,
+  langOf,
   isUnwanted,
   pageRequestOf,
   parseIsoDuration,
@@ -256,7 +257,7 @@ test('trends shelves: top, channels, music, game trailers, film and entertainmen
   ];
   const shelves = trendsShelves(ranked, channels);
   assert.deepEqual(
-    shelves.map((s) => s.title),
+    shelves.map((s) => s.title.ru),
     [
       'Топ',
       'Каналы в трендах',
@@ -266,7 +267,7 @@ test('trends shelves: top, channels, music, game trailers, film and entertainmen
     ]
   );
   assert.deepEqual(
-    trendsShelves(ranked).map((s) => s.title),
+    trendsShelves(ranked).map((s) => s.title.ru),
     ['Топ', 'Музыка', 'Игры: трейлеры', 'Кино и развлечения']
   );
 });
@@ -305,7 +306,7 @@ test('a picks row drops Shorts, kids, old and repeated videos and caps each chan
   const row = {
     id: 'shows',
     country: 'ru' as const,
-    title: 'Шоу',
+    title: { ru: 'Шоу', en: 'Russian shows' },
     order: 'views' as const,
     perChannel: 2,
     days: 30
@@ -328,7 +329,7 @@ test('a picks row drops Shorts, kids, old and repeated videos and caps each chan
     ],
     now
   );
-  assert.equal(shelf.title, 'Шоу');
+  assert.equal(shelf.title.ru, 'Шоу');
   assert.deepEqual(shelf.kind === 'videos' && shelf.videos.map((v) => v.id), [
     'b1',
     'a1',
@@ -342,7 +343,7 @@ test('a picks row can put the newest first', () => {
     {
       id: 'new',
       country: 'ru',
-      title: 'Новое',
+      title: { ru: 'Новое', en: 'New' },
       order: 'date',
       perChannel: 5,
       days: 30
@@ -432,7 +433,14 @@ test('a video tile plays the video and shows title, channel, views and age', () 
   const [, top] = shelvesOf(
     buildTrendsContents(
       'ru',
-      [{ kind: 'videos', title: 'Топ', videos: [video('abcdefghijk')] }],
+      [
+        {
+          kind: 'videos',
+          title: { ru: 'Топ', en: 'Top' },
+          videos: [video('abcdefghijk')],
+          top: true
+        }
+      ],
       now
     )
   );
@@ -458,7 +466,7 @@ test('a channel tile opens the channel and shows subscribers and trending count'
       [
         {
           kind: 'channels',
-          title: 'Каналы в трендах',
+          title: { ru: 'Каналы в трендах', en: 'Channels in trends' },
           channels: [
             {
               id: 'UCx',
@@ -497,7 +505,13 @@ test('a picks page starts with its own country row, then its rows', () => {
   const shelves = shelvesOf(
     buildPicksContents(
       'lv',
-      [{ kind: 'videos', title: 'Ceļojumi', videos: [video('p')] }],
+      [
+        {
+          kind: 'videos',
+          title: { ru: 'Ceļojumi', en: 'Latvian travel' },
+          videos: [video('p')]
+        }
+      ],
       new Date()
     )
   );
@@ -712,4 +726,72 @@ test('something that is not a guide is left alone', () => {
   assert.equal(patchGuide(notGuide).patched, false);
   assert.deepEqual(notGuide, { items: [{ foo: 1 }] });
   assert.equal(patchGuide(null).patched, false);
+});
+
+// ------------------------------------------------------------------ English
+
+test('YouTube in Russian means Russian, any other language English', () => {
+  assert.equal(langOf('ru'), 'ru');
+  assert.equal(langOf('ru-RU'), 'ru');
+  assert.equal(langOf('en'), 'en');
+  assert.equal(langOf('lv'), 'en');
+  assert.equal(langOf(undefined), 'en');
+});
+
+test('views, subscribers and ages read in English', () => {
+  assert.equal(formatViews(1, 'en'), '1 view');
+  assert.equal(formatViews(951, 'en'), '951 views');
+  assert.equal(formatViews(12983, 'en'), '12K views');
+  assert.equal(formatViews(1_250_000, 'en'), '1.2M views');
+  assert.equal(formatViews(2_100_000_000, 'en'), '2.1B views');
+  assert.equal(formatSubscribers(7_160_000, 'en'), '7.1M subscribers');
+  const now = new Date('2026-10-18T12:00:00Z');
+  assert.equal(formatAge('2026-10-18T11:59:30Z', now, 'en'), 'just now');
+  assert.equal(formatAge('2026-10-18T11:59:00Z', now, 'en'), '1 minute ago');
+  assert.equal(formatAge('2026-10-18T11:55:00Z', now, 'en'), '5 minutes ago');
+  assert.equal(formatAge('2026-10-17T11:00:00Z', now, 'en'), '1 day ago');
+  assert.equal(formatAge('2026-10-04T12:00:00Z', now, 'en'), '2 weeks ago');
+  assert.equal(formatAge('2026-07-18T12:00:00Z', now, 'en'), '3 months ago');
+  assert.equal(formatAge('2024-10-18T12:00:00Z', now, 'en'), '2 years ago');
+});
+
+test('an English trends page: country row, selected, top title, tile stats', () => {
+  const now = new Date('2026-10-18T12:00:00Z');
+  const [row, top] = shelvesOf(
+    buildTrendsContents(
+      'ru',
+      [
+        {
+          kind: 'videos',
+          title: { ru: 'Топ', en: 'Top' },
+          videos: [video('abcdefghijk')],
+          top: true
+        }
+      ],
+      now,
+      'en'
+    )
+  );
+  assert.equal(headerOf(row!).title.runs[0]!.text, 'Country');
+  assert.deepEqual(
+    tilesOf(row!).map((t) => t.metadata.tileMetadataRenderer.title.simpleText),
+    ['World', 'Europe', 'Russia', 'Latvia', 'USA']
+  );
+  assert.ok(JSON.stringify(tilesOf(row!)[2]).includes('selected'));
+  assert.equal(headerOf(top!).title.runs[0]!.text, 'Top: Russia');
+  assert.equal(headerOf(top!).subtitle.runs[0]!.text, '1 video');
+  const json = JSON.stringify(tilesOf(top!)[0]);
+  assert.ok(json.includes('1K views'));
+  assert.ok(json.includes('3 days ago'));
+});
+
+test('an English picks page and guide', () => {
+  const [row] = shelvesOf(buildPicksContents('all', [], new Date(), 'en'));
+  assert.deepEqual(
+    tilesOf(row!).map((t) => t.metadata.tileMetadataRenderer.title.simpleText),
+    ['All', 'Russia', 'Latvia', 'USA']
+  );
+  const g = guide();
+  patchGuide(g, 'en');
+  assert.deepEqual(titles(g).slice(2, 4), ['Trends', 'Picks']);
 });

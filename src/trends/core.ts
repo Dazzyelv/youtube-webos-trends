@@ -35,16 +35,45 @@ export type ChannelInfo = {
 export type TrendChannel = ChannelInfo & { videoCount: number };
 
 export type Shelf =
-  | { kind: 'videos'; title: string; videos: TrendVideo[] }
-  | { kind: 'channels'; title: string; channels: TrendChannel[] };
+  | { kind: 'videos'; title: Words; videos: TrendVideo[]; top?: boolean }
+  | { kind: 'channels'; title: Words; channels: TrendChannel[] };
 
 export type PicksCountry = 'all' | 'ru' | 'lv' | 'us';
+
+/** Our pages speak Russian when YouTube does, English otherwise. */
+export type Lang = 'ru' | 'en';
+export type Words = Record<Lang, string>;
+
+export const langOf = (hl: string | null | undefined): Lang =>
+  (hl ?? '').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+
+const WORDS = {
+  trends: { ru: 'Тренды', en: 'Trends' },
+  picks: { ru: 'Подборка', en: 'Picks' },
+  country: { ru: 'Страна', en: 'Country' },
+  chooseTrends: {
+    ru: 'Выберите, чьи тренды показать',
+    en: 'Choose whose trends to show'
+  },
+  chooseCountry: { ru: 'Выберите страну', en: 'Choose a country' },
+  selected: { ru: 'выбрано', en: 'selected' },
+  top: { ru: 'Топ', en: 'Top' },
+  channelsInTrends: { ru: 'Каналы в трендах', en: 'Channels in trends' },
+  trendsFailed: {
+    ru: 'Не удалось загрузить тренды',
+    en: 'Could not load trends'
+  },
+  picksFailed: {
+    ru: 'Не удалось загрузить подборку',
+    en: 'Could not load picks'
+  }
+} satisfies Record<string, Words>;
 
 /** One Picks row: whose it is, and how its videos are chosen once fetched. */
 export type PicksRow = {
   id: string;
   country: Exclude<PicksCountry, 'all'>;
-  title: string;
+  title: Words;
   order: 'views' | 'date';
   perChannel: number;
   days: number;
@@ -55,21 +84,21 @@ export const TRENDS_BROWSE_ID = 'FEytaf_trends';
 export const PICKS_BROWSE_ID = 'FEytaf_picks';
 
 /** In the order the country row shows them. */
-export const TAB_TITLES: Record<TrendsTab, string> = {
-  world: 'Мир',
-  europe: 'Европа',
-  ru: 'Россия',
-  lv: 'Латвия',
-  us: 'США'
+export const TAB_TITLES: Record<TrendsTab, Words> = {
+  world: { ru: 'Мир', en: 'World' },
+  europe: { ru: 'Европа', en: 'Europe' },
+  ru: { ru: 'Россия', en: 'Russia' },
+  lv: { ru: 'Латвия', en: 'Latvia' },
+  us: { ru: 'США', en: 'USA' }
 };
 
 const TAB_IDS = Object.keys(TAB_TITLES) as TrendsTab[];
 
-export const PICKS_TITLES: Record<PicksCountry, string> = {
-  all: 'Все',
-  ru: 'Россия',
-  lv: 'Латвия',
-  us: 'США'
+export const PICKS_TITLES: Record<PicksCountry, Words> = {
+  all: { ru: 'Все', en: 'All' },
+  ru: TAB_TITLES.ru,
+  lv: TAB_TITLES.lv,
+  us: TAB_TITLES.us
 };
 
 const PICKS_IDS = Object.keys(PICKS_TITLES) as PicksCountry[];
@@ -85,11 +114,14 @@ export const SHELF_SIZE = 50;
 /** Shorter than this is a Short or a clip, not a show or a trip. */
 const MIN_PICKS_SECONDS = 240;
 
-const CATEGORY_SHELVES: { title: string; categoryIds: string[] | null }[] = [
-  { title: 'Музыка', categoryIds: ['10'] },
-  { title: 'Игры: трейлеры', categoryIds: ['20'] },
-  { title: 'Кино и развлечения', categoryIds: ['1', '24', '30', '44'] },
-  { title: 'Разное', categoryIds: null }
+const CATEGORY_SHELVES: { title: Words; categoryIds: string[] | null }[] = [
+  { title: { ru: 'Музыка', en: 'Music' }, categoryIds: ['10'] },
+  { title: { ru: 'Игры: трейлеры', en: 'Game trailers' }, categoryIds: ['20'] },
+  {
+    title: { ru: 'Кино и развлечения', en: 'Film and entertainment' },
+    categoryIds: ['1', '24', '30', '44']
+  },
+  { title: { ru: 'Разное', en: 'Other' }, categoryIds: null }
 ];
 
 // ---------------------------------------------------------------- formatting
@@ -118,44 +150,94 @@ export function formatDuration(totalSec: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/** Russian one/few/many, English one/many. */
+type Forms = { ru: [string, string, string]; en: [string, string] };
+
+const word = (n: number, lang: Lang, forms: Forms) =>
+  lang === 'ru' ? plural(n, ...forms.ru) : n === 1 ? forms.en[0] : forms.en[1];
+
+const UNITS: Record<Lang, [number, string][]> = {
+  ru: [
+    [1e9, ' млрд'],
+    [1e6, ' млн'],
+    [1e3, ' тыс.']
+  ],
+  en: [
+    [1e9, 'B'],
+    [1e6, 'M'],
+    [1e3, 'K']
+  ]
+};
+
 /** Rounded down like YouTube: one decimal below 10, none above. */
-function compact(n: number, unit: number, suffix: string) {
-  const v = n / unit;
-  const shown =
-    v < 10
-      ? (Math.floor(v * 10) / 10).toString().replace('.', ',')
-      : String(Math.floor(v));
-  return `${shown} ${suffix}`;
+function countText(n: number, lang: Lang, forms: Forms) {
+  for (const [unit, suffix] of UNITS[lang]) {
+    if (n < unit) continue;
+    const v = n / unit;
+    const shown =
+      v < 10 ? String(Math.floor(v * 10) / 10) : String(Math.floor(v));
+    const many = lang === 'ru' ? forms.ru[2] : forms.en[1];
+    return `${lang === 'ru' ? shown.replace('.', ',') : shown}${suffix} ${many}`;
+  }
+  return `${n} ${word(n, lang, forms)}`;
 }
 
-function countText(n: number, one: string, few: string, many: string) {
-  if (n >= 1e9) return `${compact(n, 1e9, 'млрд')} ${many}`;
-  if (n >= 1e6) return `${compact(n, 1e6, 'млн')} ${many}`;
-  if (n >= 1e3) return `${compact(n, 1e3, 'тыс.')} ${many}`;
-  return `${n} ${plural(n, one, few, many)}`;
-}
+const VIEWS: Forms = {
+  ru: ['просмотр', 'просмотра', 'просмотров'],
+  en: ['view', 'views']
+};
+const SUBSCRIBERS: Forms = {
+  ru: ['подписчик', 'подписчика', 'подписчиков'],
+  en: ['subscriber', 'subscribers']
+};
+const VIDEOS: Forms = {
+  ru: ['видео', 'видео', 'видео'],
+  en: ['video', 'videos']
+};
+const CHANNELS: Forms = {
+  ru: ['канал', 'канала', 'каналов'],
+  en: ['channel', 'channels']
+};
 
-export const formatViews = (n: number) =>
-  countText(n, 'просмотр', 'просмотра', 'просмотров');
+export const formatViews = (n: number, lang: Lang = 'ru') =>
+  countText(n, lang, VIEWS);
 
-export const formatSubscribers = (n: number) =>
-  countText(n, 'подписчик', 'подписчика', 'подписчиков');
+export const formatSubscribers = (n: number, lang: Lang = 'ru') =>
+  countText(n, lang, SUBSCRIBERS);
 
-export function formatAge(publishedAt: string, now: Date): string {
+const AGE: Forms[] = [
+  { ru: ['минуту', 'минуты', 'минут'], en: ['minute', 'minutes'] },
+  { ru: ['час', 'часа', 'часов'], en: ['hour', 'hours'] },
+  { ru: ['день', 'дня', 'дней'], en: ['day', 'days'] },
+  { ru: ['неделю', 'недели', 'недель'], en: ['week', 'weeks'] },
+  { ru: ['месяц', 'месяца', 'месяцев'], en: ['month', 'months'] },
+  { ru: ['год', 'года', 'лет'], en: ['year', 'years'] }
+];
+
+export function formatAge(
+  publishedAt: string,
+  now: Date,
+  lang: Lang = 'ru'
+): string {
   const sec = Math.max(0, (now.getTime() - Date.parse(publishedAt)) / 1000);
-  const ago = (n: number, one: string, few: string, many: string) =>
-    `${n} ${plural(n, one, few, many)} назад`;
   const min = Math.floor(sec / 60);
   const hours = Math.floor(sec / 3600);
   const days = Math.floor(sec / 86400);
-  if (min < 1) return 'только что';
-  if (hours < 1) return ago(min, 'минуту', 'минуты', 'минут');
-  if (days < 1) return ago(hours, 'час', 'часа', 'часов');
-  if (days < 7) return ago(days, 'день', 'дня', 'дней');
-  if (days < 30) return ago(Math.floor(days / 7), 'неделю', 'недели', 'недель');
-  if (days < 365)
-    return ago(Math.floor(days / 30), 'месяц', 'месяца', 'месяцев');
-  return ago(Math.floor(days / 365), 'год', 'года', 'лет');
+  if (min < 1) return lang === 'ru' ? 'только что' : 'just now';
+  const [n, unit] =
+    hours < 1
+      ? [min, 0]
+      : days < 1
+        ? [hours, 1]
+        : days < 7
+          ? [days, 2]
+          : days < 30
+            ? [Math.floor(days / 7), 3]
+            : days < 365
+              ? [Math.floor(days / 30), 4]
+              : [Math.floor(days / 365), 5];
+  const ago = `${n} ${word(n, lang, AGE[unit]!)}`;
+  return lang === 'ru' ? `${ago} назад` : `${ago} ago`;
 }
 
 // ------------------------------------------------------------------ the data
@@ -335,8 +417,13 @@ export function trendsShelves(
 ): Shelf[] {
   const named = CATEGORY_SHELVES.flatMap((c) => c.categoryIds ?? []);
   const shelves: Shelf[] = [
-    { kind: 'videos', title: 'Топ', videos: ranked.slice(0, SHELF_SIZE) },
-    { kind: 'channels', title: 'Каналы в трендах', channels }
+    {
+      kind: 'videos',
+      title: WORDS.top,
+      videos: ranked.slice(0, SHELF_SIZE),
+      top: true
+    },
+    { kind: 'channels', title: WORDS.channelsInTrends, channels }
   ];
   for (const { title, categoryIds } of CATEGORY_SHELVES) {
     const videos = ranked
@@ -402,10 +489,10 @@ const line = (...items: object[]) => ({
   lineRenderer: { items: items.map((t) => ({ lineItemRenderer: { text: t } })) }
 });
 
-function buildVideoTile(v: TrendVideo, now: Date) {
+function buildVideoTile(v: TrendVideo, now: Date, lang: Lang) {
   const stats = [
-    v.views === null ? null : formatViews(v.views),
-    v.publishedAt ? formatAge(v.publishedAt, now) : null
+    v.views === null ? null : formatViews(v.views, lang),
+    v.publishedAt ? formatAge(v.publishedAt, now, lang) : null
   ].filter((x): x is string => x !== null);
   const statsLine = stats.flatMap((s, i) =>
     i === 0 ? [text(s)] : [text('•'), text(s)]
@@ -444,10 +531,10 @@ function buildVideoTile(v: TrendVideo, now: Date) {
   };
 }
 
-function buildChannelTile(c: TrendChannel) {
+function buildChannelTile(c: TrendChannel, lang: Lang) {
   const lines = [
-    c.subscribers === null ? null : formatSubscribers(c.subscribers),
-    `${countText(c.videoCount, 'видео', 'видео', 'видео')} в трендах`
+    c.subscribers === null ? null : formatSubscribers(c.subscribers, lang),
+    `${countText(c.videoCount, lang, VIDEOS)} ${lang === 'ru' ? 'в трендах' : 'in trends'}`
   ].filter((x): x is string => x !== null);
   return {
     tileRenderer: {
@@ -524,7 +611,8 @@ function buildCountryTile(
   country: TrendsTab | PicksCountry,
   title: string,
   browseId: string,
-  selected: boolean
+  selected: boolean,
+  lang: Lang
 ) {
   return {
     tileRenderer: {
@@ -539,7 +627,7 @@ function buildCountryTile(
       metadata: {
         tileMetadataRenderer: {
           title: text(title),
-          lines: selected ? [line(text('выбрано'))] : []
+          lines: selected ? [line(text(WORDS.selected[lang]))] : []
         }
       },
       onSelectCommand: { browseEndpoint: { browseId } },
@@ -573,17 +661,17 @@ function buildShelf(title: string, subtitle: string, items: object[]) {
   };
 }
 
-function renderShelf(s: Shelf, now: Date, title = s.title) {
+function renderShelf(s: Shelf, now: Date, lang: Lang, title = s.title[lang]) {
   return s.kind === 'videos'
     ? buildShelf(
         title,
-        `${s.videos.length} видео`,
-        s.videos.map((v) => buildVideoTile(v, now))
+        countText(s.videos.length, lang, VIDEOS),
+        s.videos.map((v) => buildVideoTile(v, now, lang))
       )
     : buildShelf(
         title,
-        `${countText(s.channels.length, 'канал', 'канала', 'каналов')}`,
-        s.channels.map(buildChannelTile)
+        countText(s.channels.length, lang, CHANNELS),
+        s.channels.map((c) => buildChannelTile(c, lang))
       );
 }
 
@@ -604,23 +692,33 @@ const page = (shelves: object[]) => ({
 export function buildTrendsContents(
   tab: TrendsTab,
   shelvesOrError: Shelf[] | string,
-  now: Date
+  now: Date,
+  lang: Lang = 'ru'
 ) {
   const countries = buildShelf(
-    'Страна',
-    'Выберите, чьи тренды показать',
+    WORDS.country[lang],
+    WORDS.chooseTrends[lang],
     TAB_IDS.map((t) =>
-      buildCountryTile(t, TAB_TITLES[t], `${TRENDS_BROWSE_ID}_${t}`, t === tab)
+      buildCountryTile(
+        t,
+        TAB_TITLES[t][lang],
+        `${TRENDS_BROWSE_ID}_${t}`,
+        t === tab,
+        lang
+      )
     )
   );
   const rest =
     typeof shelvesOrError === 'string'
-      ? [buildShelf('Не удалось загрузить тренды', shelvesOrError, [])]
+      ? [buildShelf(WORDS.trendsFailed[lang], shelvesOrError, [])]
       : shelvesOrError.map((s) =>
           renderShelf(
             s,
             now,
-            s.title === 'Топ' ? `Топ: ${TAB_TITLES[tab]}` : s.title
+            lang,
+            s.kind === 'videos' && s.top
+              ? `${s.title[lang]}: ${TAB_TITLES[tab][lang]}`
+              : s.title[lang]
           )
         );
   return page([countries, ...rest]);
@@ -638,24 +736,26 @@ export function picksRowsFor<T extends { country: string }>(
 export function buildPicksContents(
   country: PicksCountry,
   shelvesOrError: Shelf[] | string,
-  now: Date
+  now: Date,
+  lang: Lang = 'ru'
 ) {
   const countries = buildShelf(
-    'Страна',
-    'Выберите страну',
+    WORDS.country[lang],
+    WORDS.chooseCountry[lang],
     PICKS_IDS.map((c) =>
       buildCountryTile(
         c,
-        PICKS_TITLES[c],
+        PICKS_TITLES[c][lang],
         `${PICKS_BROWSE_ID}_${c}`,
-        c === country
+        c === country,
+        lang
       )
     )
   );
   const rest =
     typeof shelvesOrError === 'string'
-      ? [buildShelf('Не удалось загрузить подборку', shelvesOrError, [])]
-      : shelvesOrError.map((s) => renderShelf(s, now));
+      ? [buildShelf(WORDS.picksFailed[lang], shelvesOrError, [])]
+      : shelvesOrError.map((s) => renderShelf(s, now, lang));
   return page([countries, ...rest]);
 }
 
@@ -738,22 +838,30 @@ type GuideEntry = {
 const browseIdOf = (e: GuideEntry) =>
   e?.guideEntryRenderer?.navigationEndpoint?.browseEndpoint?.browseId;
 
-const OUR_ENTRIES: GuideEntry[] = [
-  { browseId: TRENDS_BROWSE_ID, icon: 'WHATS_HOT', title: 'Тренды' },
-  { browseId: PICKS_BROWSE_ID, icon: 'EXPLORE', title: 'Подборка' }
-].map(({ browseId, icon, title }) => ({
-  guideEntryRenderer: {
-    navigationEndpoint: { browseEndpoint: { browseId } },
-    icon: { iconType: icon },
-    formattedTitle: { simpleText: title }
-  } as NonNullable<GuideEntry['guideEntryRenderer']>
-}));
+const ourEntries = (lang: Lang): GuideEntry[] =>
+  [
+    {
+      browseId: TRENDS_BROWSE_ID,
+      icon: 'WHATS_HOT',
+      title: WORDS.trends[lang]
+    },
+    { browseId: PICKS_BROWSE_ID, icon: 'EXPLORE', title: WORDS.picks[lang] }
+  ].map(({ browseId, icon, title }) => ({
+    guideEntryRenderer: {
+      navigationEndpoint: { browseEndpoint: { browseId } },
+      icon: { iconType: icon },
+      formattedTitle: { simpleText: title }
+    } as NonNullable<GuideEntry['guideEntryRenderer']>
+  }));
 
 /**
  * Adds Trends and Picks after Home and drops the hidden topics. Returns the
  * Home browse id: a page this account can surely open, used as the carrier.
  */
-export function patchGuide(guide: unknown): {
+export function patchGuide(
+  guide: unknown,
+  lang: Lang = 'ru'
+): {
   patched: boolean;
   homeBrowseId: string | null;
 } {
@@ -781,7 +889,7 @@ export function patchGuide(guide: unknown): {
     homeBrowseId = browseIdOf(section.items[home]!) ?? null;
     if (section.items.some((e) => browseIdOf(e)?.startsWith('FEytaf_')))
       continue;
-    section.items.splice(home + 1, 0, ...OUR_ENTRIES.map((e) => ({ ...e })));
+    section.items.splice(home + 1, 0, ...ourEntries(lang));
   }
   return { patched: true, homeBrowseId };
 }

@@ -15,6 +15,7 @@ import {
   buildTrendsContents,
   channelFromApi,
   isUnwanted,
+  langOf,
   pageRequestOf,
   patchGuide,
   picksRowsFor,
@@ -28,6 +29,7 @@ import {
   videoFromApi,
   withCarrier,
   type ChannelInfo,
+  type Lang,
   type PageRequest,
   type PicksCountry,
   type RankedVideo,
@@ -57,6 +59,12 @@ const LAST_TAB_KEY = 'ytaf-trends-last';
 const LAST_PICKS_KEY = 'ytaf-picks-last';
 
 let carrierBrowseId = 'FEtopics';
+
+/** YouTube's interface language; our pages, titles and caches follow it. */
+function uiLang(): Lang {
+  const w = window as { yt?: { config_?: { HL?: string } } };
+  return langOf(w.yt?.config_?.HL ?? navigator.language);
+}
 
 // ---------------------------------------------------------------- storage
 
@@ -136,7 +144,7 @@ async function fetchRegion(
       part: VIDEO_PARTS,
       chart: 'mostPopular',
       maxResults: '50',
-      hl: 'ru',
+      hl: uiLang(),
       regionCode: region,
       ...(pageToken ? { pageToken } : {})
     });
@@ -152,7 +160,11 @@ async function videosByIds(ids: string[]): Promise<TrendVideo[]> {
   for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
   const pages = await Promise.all(
     chunks.map((chunk) =>
-      api<Page>('videos', { part: VIDEO_PARTS, id: chunk.join(','), hl: 'ru' })
+      api<Page>('videos', {
+        part: VIDEO_PARTS,
+        id: chunk.join(','),
+        hl: uiLang()
+      })
     )
   );
   return pages.flatMap((p) => toVideos(p.items));
@@ -192,7 +204,7 @@ function once(key: string, load: () => Promise<Shelf[] | string>) {
 }
 
 function loadTrends(tab: TrendsTab): Promise<Shelf[] | string> {
-  const key = `${STORAGE_PREFIX}${tab}`;
+  const key = `${STORAGE_PREFIX}${tab}-${uiLang()}`;
   const cached = read<CachedTrends>(key);
   if (cached && Date.now() - cached.at < TRENDS_FRESH_MS) {
     return Promise.resolve(trendsShelves(cached.videos, cached.channels));
@@ -287,7 +299,7 @@ const rowsInFlight = new Map<string, Promise<Shelf>>();
 
 /** One Picks row, from storage while fresh; rejects when its source fails. */
 function loadPicksRow(row: (typeof PICKS)[number]): Promise<Shelf> {
-  const key = `${STORAGE_PREFIX}row-${row.id}`;
+  const key = `${STORAGE_PREFIX}row-${row.id}-${uiLang()}`;
   const cached = read<CachedRow>(key);
   if (cached && Date.now() - cached.at < PICKS_FRESH_MS) {
     return Promise.resolve(cached.shelf);
@@ -339,11 +351,16 @@ async function contentsFor(request: PageRequest): Promise<object> {
     const country =
       request.country === 'remembered' ? rememberedPicks() : request.country;
     write(LAST_PICKS_KEY, country);
-    return buildPicksContents(country, await loadPicks(country), new Date());
+    return buildPicksContents(
+      country,
+      await loadPicks(country),
+      new Date(),
+      uiLang()
+    );
   }
   const tab = request.tab === 'remembered' ? rememberedTab() : request.tab;
   write(LAST_TAB_KEY, tab);
-  return buildTrendsContents(tab, await loadTrends(tab), new Date());
+  return buildTrendsContents(tab, await loadTrends(tab), new Date(), uiLang());
 }
 
 // ----------------------------------------------------------------- the guide
@@ -356,7 +373,7 @@ JSON.parse = function (...args: Parameters<typeof JSON.parse>) {
     Array.isArray(items) &&
     items.some((i) => (i as Record<string, unknown>)?.guideSectionRenderer)
   ) {
-    const { patched, homeBrowseId } = patchGuide(r);
+    const { patched, homeBrowseId } = patchGuide(r, uiLang());
     if (homeBrowseId) carrierBrowseId = homeBrowseId;
     if (patched) {
       console.info('[trends] Guide patched, carrier', carrierBrowseId);

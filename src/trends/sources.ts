@@ -77,7 +77,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'ru-travel-search',
     country: 'ru',
-    title: 'Путешествия',
+    title: { ru: 'Путешествия', en: 'Russian travel' },
     order: 'views',
     perChannel: 2,
     days: 14,
@@ -86,7 +86,10 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'ru-travel-channels',
     country: 'ru',
-    title: 'Новое на каналах о путешествиях',
+    title: {
+      ru: 'Новое на каналах о путешествиях',
+      en: 'New from Russian travel channels'
+    },
     order: 'date',
     perChannel: 3,
     days: 30,
@@ -95,7 +98,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'ru-shows',
     country: 'ru',
-    title: 'Шоу',
+    title: { ru: 'Шоу', en: 'Russian shows' },
     order: 'views',
     perChannel: 5,
     // Russian shows come out every week or two; a month is too short a window.
@@ -105,7 +108,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'lv-travel-search',
     country: 'lv',
-    title: 'Ceļojumi',
+    title: { ru: 'Ceļojumi', en: 'Latvian travel' },
     order: 'views',
     perChannel: 3,
     days: 30,
@@ -114,7 +117,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'lv-shows-search',
     country: 'lv',
-    title: 'Šovi',
+    title: { ru: 'Šovi', en: 'Latvian shows' },
     order: 'views',
     perChannel: 4,
     days: 30,
@@ -123,7 +126,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'lv-russian-channels',
     country: 'lv',
-    title: 'Латвия по-русски',
+    title: { ru: 'Латвия по-русски', en: 'Latvia in Russian' },
     order: 'date',
     perChannel: 3,
     days: 30,
@@ -132,7 +135,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'us-travel',
     country: 'us',
-    title: 'Travel',
+    title: { ru: 'Travel', en: 'Travel' },
     order: 'views',
     perChannel: 4,
     days: 30,
@@ -141,7 +144,7 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
     id: 'us-shows',
     country: 'us',
-    title: 'Shows',
+    title: { ru: 'Shows', en: 'Shows' },
     order: 'views',
     perChannel: 4,
     days: 21,
