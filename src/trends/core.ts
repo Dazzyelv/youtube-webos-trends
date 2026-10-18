@@ -1,8 +1,8 @@
 /**
- * Trends tabs: everything that does not touch the browser, so it can be
- * tested under node. YouTube retired its Trending page in July 2025; this
- * page is rebuilt from the Data API `mostPopular` chart: one country, or
- * several merged (world, Europe).
+ * Trends and Picks pages: everything that does not touch the browser, so it
+ * can be tested under node. YouTube retired its Trending page in July 2025;
+ * Trends is rebuilt from the Data API `mostPopular` chart (one country, or
+ * several merged), Picks from searches and hand-picked channels.
  *
  * This file must not import anything at runtime (the tests load it directly).
  */
@@ -13,19 +13,42 @@ export type TrendVideo = {
   id: string;
   title: string;
   channel: string;
+  channelId: string;
   views: number | null;
   publishedAt: string;
   durationSec: number | null;
   categoryId: string;
   thumbnail: string;
+  tags: string[];
+  forKids: boolean;
 };
 
 export type RankedVideo = TrendVideo & { score: number; countries: number };
 
-export type Shelf = { title: string; videos: RankedVideo[] };
+export type ChannelInfo = {
+  id: string;
+  title: string;
+  avatar: string;
+  subscribers: number | null;
+};
+
+export type TrendChannel = ChannelInfo & { videoCount: number };
+
+export type Shelf =
+  | { kind: 'videos'; title: string; videos: TrendVideo[] }
+  | { kind: 'channels'; title: string; channels: TrendChannel[] };
+
+/** One Picks row: how its videos are chosen once fetched. */
+export type PicksRow = {
+  title: string;
+  order: 'views' | 'date';
+  perChannel: number;
+  days: number;
+};
 
 /** The guide entry opens the country chosen last; each country has its own id. */
 export const TRENDS_BROWSE_ID = 'FEytaf_trends';
+export const PICKS_BROWSE_ID = 'FEytaf_picks';
 
 /** In the order the country row shows them. */
 export const TAB_TITLES: Record<TrendsTab, string> = {
@@ -44,11 +67,14 @@ const HIDDEN_BROWSE_IDS = [
   'FEtopics_sports'
 ];
 
-const SHELF_SIZE = 30;
+export const SHELF_SIZE = 50;
+
+/** Shorter than this is a Short or a clip, not a show or a trip. */
+const MIN_PICKS_SECONDS = 240;
 
 const CATEGORY_SHELVES: { title: string; categoryIds: string[] | null }[] = [
   { title: 'Музыка', categoryIds: ['10'] },
-  { title: 'Игры', categoryIds: ['20'] },
+  { title: 'Игры: трейлеры', categoryIds: ['20'] },
   { title: 'Кино и развлечения', categoryIds: ['1', '24', '30', '44'] },
   { title: 'Разное', categoryIds: null }
 ];
@@ -89,12 +115,18 @@ function compact(n: number, unit: number, suffix: string) {
   return `${shown} ${suffix}`;
 }
 
-export function formatViews(n: number): string {
-  if (n >= 1e9) return `${compact(n, 1e9, 'млрд')} просмотров`;
-  if (n >= 1e6) return `${compact(n, 1e6, 'млн')} просмотров`;
-  if (n >= 1e3) return `${compact(n, 1e3, 'тыс.')} просмотров`;
-  return `${n} ${plural(n, 'просмотр', 'просмотра', 'просмотров')}`;
+function countText(n: number, one: string, few: string, many: string) {
+  if (n >= 1e9) return `${compact(n, 1e9, 'млрд')} ${many}`;
+  if (n >= 1e6) return `${compact(n, 1e6, 'млн')} ${many}`;
+  if (n >= 1e3) return `${compact(n, 1e3, 'тыс.')} ${many}`;
+  return `${n} ${plural(n, one, few, many)}`;
 }
+
+export const formatViews = (n: number) =>
+  countText(n, 'просмотр', 'просмотра', 'просмотров');
+
+export const formatSubscribers = (n: number) =>
+  countText(n, 'подписчик', 'подписчика', 'подписчиков');
 
 export function formatAge(publishedAt: string, now: Date): string {
   const sec = Math.max(0, (now.getTime() - Date.parse(publishedAt)) / 1000);
@@ -115,23 +147,26 @@ export function formatAge(publishedAt: string, now: Date): string {
 
 // ------------------------------------------------------------------ the data
 
-type ApiItem = {
+type ApiVideo = {
   id?: unknown;
   snippet?: {
     title?: string;
     localized?: { title?: string };
     channelTitle?: string;
+    channelId?: string;
     publishedAt?: string;
     categoryId?: string;
+    tags?: string[];
     thumbnails?: Record<string, { url?: string } | undefined>;
   };
   contentDetails?: { duration?: string };
   statistics?: { viewCount?: string };
+  status?: { madeForKids?: boolean };
 };
 
 /** One `videos.list` item, or null when it lacks what a tile needs. */
 export function videoFromApi(raw: unknown): TrendVideo | null {
-  const item = raw as ApiItem;
+  const item = raw as ApiVideo;
   const s = item?.snippet;
   if (typeof item?.id !== 'string' || !s?.title) return null;
   const views = Number(item.statistics?.viewCount);
@@ -140,15 +175,95 @@ export function videoFromApi(raw: unknown): TrendVideo | null {
     id: item.id,
     title: s.localized?.title || s.title,
     channel: s.channelTitle ?? '',
+    channelId: s.channelId ?? '',
     views: Number.isFinite(views) ? views : null,
     publishedAt: s.publishedAt ?? '',
     durationSec: duration ? parseIsoDuration(duration) : null,
     categoryId: s.categoryId ?? '',
     thumbnail:
       s.thumbnails?.high?.url ??
-      `https://i.ytimg.com/vi/${item.id}/hqdefault.jpg`
+      `https://i.ytimg.com/vi/${item.id}/hqdefault.jpg`,
+    tags: s.tags ?? [],
+    forKids: item.status?.madeForKids === true
   };
 }
+
+type ApiChannel = {
+  id?: unknown;
+  snippet?: {
+    title?: string;
+    thumbnails?: Record<string, { url?: string } | undefined>;
+  };
+  statistics?: { subscriberCount?: string; hiddenSubscriberCount?: boolean };
+};
+
+/** One `channels.list` item, or null when it lacks a name or a picture. */
+export function channelFromApi(raw: unknown): ChannelInfo | null {
+  const item = raw as ApiChannel;
+  const t = item?.snippet?.thumbnails;
+  const avatar = t?.high?.url ?? t?.medium?.url ?? t?.default?.url;
+  if (typeof item?.id !== 'string' || !item.snippet?.title || !avatar)
+    return null;
+  const subs = Number(item.statistics?.subscriberCount);
+  return {
+    id: item.id,
+    title: item.snippet.title,
+    avatar,
+    subscribers:
+      item.statistics?.hiddenSubscriberCount || !Number.isFinite(subs)
+        ? null
+        : subs
+  };
+}
+
+// ------------------------------------------------------------------ filters
+
+/** Kids' games, cartoons and anime; matched in title, channel and tags. */
+const CARTOONISH = new RegExp(
+  [
+    'roblox',
+    'роблокс',
+    'minecraft',
+    'майнкрафт',
+    'brookhaven',
+    'брукхейвен',
+    '\\bfnaf\\b',
+    'фнаф',
+    'skibidi',
+    'скибиди',
+    'toca boca',
+    'аниме',
+    '\\banime\\b',
+    'мультфильм',
+    'мультик',
+    'мультсериал',
+    'cartoon',
+    'леди баг',
+    'miraculous',
+    'маша и медведь',
+    'peppa',
+    'пеппа',
+    'bluey',
+    'три кота',
+    'фиксики',
+    'смешарики',
+    'барбоскины',
+    'лунтик'
+  ].join('|'),
+  'i'
+);
+
+/** Of the games, only trailers and announcements stay. */
+const GAME_TRAILER =
+  /трейлер|trailer|тизер|teaser|анонс|announce|reveal|showcase|презентац/i;
+
+export function isUnwanted(v: TrendVideo): boolean {
+  if (v.forKids) return true;
+  if (CARTOONISH.test([v.title, v.channel, ...v.tags].join(' '))) return true;
+  return v.categoryId === '20' && !GAME_TRAILER.test(v.title);
+}
+
+// ------------------------------------------------------------------- trends
 
 /**
  * One list per country, best first. A video earns (n - rank) / n from each
@@ -174,10 +289,41 @@ export function rankAcrossRegions(lists: TrendVideo[][]): RankedVideo[] {
   );
 }
 
-export function groupIntoShelves(ranked: RankedVideo[]): Shelf[] {
+/** Channels behind the ranked videos, strongest first. */
+export function topChannelIds(ranked: RankedVideo[], limit: number): string[] {
+  const score = new Map<string, number>();
+  for (const v of ranked) {
+    if (v.channelId)
+      score.set(v.channelId, (score.get(v.channelId) ?? 0) + v.score);
+  }
+  return [...score.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id]) => id);
+}
+
+/** The channels of `ids`, in that order, with how many trending videos each has. */
+export function trendingChannels(
+  ranked: RankedVideo[],
+  ids: string[],
+  infos: ChannelInfo[]
+): TrendChannel[] {
+  return ids.flatMap((id) => {
+    const info = infos.find((c) => c.id === id);
+    if (!info) return [];
+    const videoCount = ranked.filter((v) => v.channelId === id).length;
+    return [{ ...info, videoCount }];
+  });
+}
+
+export function trendsShelves(
+  ranked: RankedVideo[],
+  channels: TrendChannel[] = []
+): Shelf[] {
   const named = CATEGORY_SHELVES.flatMap((c) => c.categoryIds ?? []);
   const shelves: Shelf[] = [
-    { title: 'Топ', videos: ranked.slice(0, SHELF_SIZE) }
+    { kind: 'videos', title: 'Топ', videos: ranked.slice(0, SHELF_SIZE) },
+    { kind: 'channels', title: 'Каналы в трендах', channels }
   ];
   for (const { title, categoryIds } of CATEGORY_SHELVES) {
     const videos = ranked
@@ -187,9 +333,52 @@ export function groupIntoShelves(ranked: RankedVideo[]): Shelf[] {
           : !named.includes(v.categoryId)
       )
       .slice(0, SHELF_SIZE);
-    shelves.push({ title, videos });
+    shelves.push({ kind: 'videos', title, videos });
   }
-  return shelves.filter((s) => s.videos.length > 0);
+  return shelves.filter((s) =>
+    s.kind === 'videos' ? s.videos.length > 0 : s.channels.length > 0
+  );
+}
+
+// -------------------------------------------------------------------- picks
+
+/**
+ * A Picks row from whatever its source returned: no kids' stuff, no Shorts,
+ * nothing older than `days`, each video once, at most `perChannel` per
+ * channel, most viewed or newest first.
+ */
+export function picksShelf(
+  row: PicksRow,
+  videos: TrendVideo[],
+  now: Date
+): Shelf {
+  const oldest = now.getTime() - row.days * 86400 * 1000;
+  const seen = new Set<string>();
+  const fresh = videos.filter((v) => {
+    if (seen.has(v.id)) return false;
+    seen.add(v.id);
+    return (
+      !isUnwanted(v) &&
+      (v.durationSec ?? 0) >= MIN_PICKS_SECONDS &&
+      Date.parse(v.publishedAt) >= oldest
+    );
+  });
+  fresh.sort((a, b) =>
+    row.order === 'views'
+      ? (b.views ?? 0) - (a.views ?? 0)
+      : Date.parse(b.publishedAt) - Date.parse(a.publishedAt)
+  );
+  const perChannel = new Map<string, number>();
+  const chosen = fresh.filter((v) => {
+    const n = perChannel.get(v.channelId) ?? 0;
+    perChannel.set(v.channelId, n + 1);
+    return n < row.perChannel;
+  });
+  return {
+    kind: 'videos',
+    title: row.title,
+    videos: chosen.slice(0, SHELF_SIZE)
+  };
 }
 
 // ------------------------------------------------- what the TV app renders
@@ -200,7 +389,7 @@ const line = (...items: object[]) => ({
   lineRenderer: { items: items.map((t) => ({ lineItemRenderer: { text: t } })) }
 });
 
-function buildTile(v: RankedVideo, now: Date) {
+function buildVideoTile(v: TrendVideo, now: Date) {
   const stats = [
     v.views === null ? null : formatViews(v.views),
     v.publishedAt ? formatAge(v.publishedAt, now) : null
@@ -238,6 +427,34 @@ function buildTile(v: RankedVideo, now: Date) {
       onSelectCommand: { watchEndpoint: { videoId: v.id } },
       contentId: v.id,
       contentType: 'TILE_CONTENT_TYPE_VIDEO'
+    }
+  };
+}
+
+function buildChannelTile(c: TrendChannel) {
+  const lines = [
+    c.subscribers === null ? null : formatSubscribers(c.subscribers),
+    `${countText(c.videoCount, 'видео', 'видео', 'видео')} в трендах`
+  ].filter((x): x is string => x !== null);
+  return {
+    tileRenderer: {
+      style: 'TILE_STYLE_YTLR_ROUND',
+      header: {
+        tileHeaderRenderer: {
+          thumbnail: {
+            thumbnails: [{ url: c.avatar, width: 240, height: 240 }]
+          }
+        }
+      },
+      metadata: {
+        tileMetadataRenderer: {
+          title: text(c.title),
+          lines: lines.map((l) => line(text(l)))
+        }
+      },
+      onSelectCommand: { browseEndpoint: { browseId: c.id } },
+      contentId: c.id,
+      contentType: 'TILE_CONTENT_TYPE_CHANNEL'
     }
   };
 }
@@ -339,11 +556,35 @@ function buildShelf(title: string, subtitle: string, items: object[]) {
   };
 }
 
+function renderShelf(s: Shelf, now: Date, title = s.title) {
+  return s.kind === 'videos'
+    ? buildShelf(
+        title,
+        `${s.videos.length} видео`,
+        s.videos.map((v) => buildVideoTile(v, now))
+      )
+    : buildShelf(
+        title,
+        `${countText(s.channels.length, 'канал', 'канала', 'каналов')}`,
+        s.channels.map(buildChannelTile)
+      );
+}
+
+const page = (shelves: object[]) => ({
+  tvBrowseRenderer: {
+    content: {
+      tvSurfaceContentRenderer: {
+        content: { sectionListRenderer: { contents: shelves } }
+      }
+    }
+  }
+});
+
 /**
- * The `contents` of a browse response: the country row, then the chosen
+ * The `contents` of a Trends page: the country row, then the chosen
  * country's shelves or the reason there are none.
  */
-export function buildBrowseContents(
+export function buildTrendsContents(
   tab: TrendsTab,
   shelvesOrError: Shelf[] | string,
   now: Date
@@ -357,34 +598,44 @@ export function buildBrowseContents(
     typeof shelvesOrError === 'string'
       ? [buildShelf('Не удалось загрузить тренды', shelvesOrError, [])]
       : shelvesOrError.map((s) =>
-          buildShelf(
-            s.title === 'Топ' ? `Топ: ${TAB_TITLES[tab]}` : s.title,
-            `${s.videos.length} видео`,
-            s.videos.map((v) => buildTile(v, now))
+          renderShelf(
+            s,
+            now,
+            s.title === 'Топ' ? `Топ: ${TAB_TITLES[tab]}` : s.title
           )
         );
-  const shelves = [countries, ...rest];
-  return {
-    tvBrowseRenderer: {
-      content: {
-        tvSurfaceContentRenderer: {
-          content: { sectionListRenderer: { contents: shelves } }
-        }
-      }
-    }
-  };
+  return page([countries, ...rest]);
+}
+
+/** The `contents` of the Picks page. */
+export function buildPicksContents(
+  shelvesOrError: Shelf[] | string,
+  now: Date
+) {
+  return page(
+    typeof shelvesOrError === 'string'
+      ? [buildShelf('Не удалось загрузить подборку', shelvesOrError, [])]
+      : shelvesOrError.map((s) => renderShelf(s, now))
+  );
 }
 
 // ------------------------------------------------------ requests and guide
 
-/** Which trends page a browse request asks for; `remembered` = the guide entry. */
-export function trendsRequestOf(
-  requestBody: string
-): TrendsTab | 'remembered' | null {
-  const m = /"browseId"\s*:\s*"FEytaf_trends(?:_(\w+))?"/.exec(requestBody);
+export type PageRequest =
+  | { page: 'trends'; tab: TrendsTab | 'remembered' }
+  | { page: 'picks' };
+
+/** Which of our pages a browse request asks for, if any. */
+export function pageRequestOf(requestBody: string): PageRequest | null {
+  const m = /"browseId"\s*:\s*"FEytaf_(trends|picks)(?:_(\w+))?"/.exec(
+    requestBody
+  );
   if (!m) return null;
-  if (m[1] === undefined) return 'remembered';
-  return (TAB_IDS as string[]).includes(m[1]) ? (m[1] as TrendsTab) : null;
+  if (m[1] === 'picks') return m[2] === undefined ? { page: 'picks' } : null;
+  if (m[2] === undefined) return { page: 'trends', tab: 'remembered' };
+  return (TAB_IDS as string[]).includes(m[2])
+    ? { page: 'trends', tab: m[2] as TrendsTab }
+    : null;
 }
 
 /**
@@ -407,7 +658,7 @@ export function toRememberedCountry(
 /** The same request, asking for a real page we then fill with our shelves. */
 export function withCarrier(requestBody: string, carrierBrowseId: string) {
   return requestBody.replace(
-    /"browseId"\s*:\s*"FEytaf_trends(?:_\w+)?"/,
+    /"browseId"\s*:\s*"FEytaf_\w+"/,
     `"browseId":"${carrierBrowseId}"`
   );
 }
@@ -415,18 +666,13 @@ export function withCarrier(requestBody: string, carrierBrowseId: string) {
 const JSON_PREFIX = ")]}'\n";
 
 /** The real response with its `contents` replaced; everything else kept. */
-export function swapBrowseContents(
-  realText: string,
-  tab: TrendsTab,
-  shelvesOrError: Shelf[] | string,
-  now: Date
-): string {
+export function swapBrowseContents(realText: string, contents: object): string {
   const prefix = realText.startsWith(JSON_PREFIX) ? JSON_PREFIX : '';
   const real = JSON.parse(realText.slice(prefix.length)) as Record<
     string,
     unknown
   >;
-  real.contents = buildBrowseContents(tab, shelvesOrError, now);
+  real.contents = contents;
   return prefix + JSON.stringify(real);
 }
 
@@ -440,8 +686,19 @@ type GuideEntry = {
 const browseIdOf = (e: GuideEntry) =>
   e?.guideEntryRenderer?.navigationEndpoint?.browseEndpoint?.browseId;
 
+const OUR_ENTRIES: GuideEntry[] = [
+  { browseId: TRENDS_BROWSE_ID, icon: 'WHATS_HOT', title: 'Тренды' },
+  { browseId: PICKS_BROWSE_ID, icon: 'EXPLORE', title: 'Подборка' }
+].map(({ browseId, icon, title }) => ({
+  guideEntryRenderer: {
+    navigationEndpoint: { browseEndpoint: { browseId } },
+    icon: { iconType: icon },
+    formattedTitle: { simpleText: title }
+  } as NonNullable<GuideEntry['guideEntryRenderer']>
+}));
+
 /**
- * Adds the Trends entry after Home and drops the hidden topics. Returns the
+ * Adds Trends and Picks after Home and drops the hidden topics. Returns the
  * Home browse id: a page this account can surely open, used as the carrier.
  */
 export function patchGuide(guide: unknown): {
@@ -470,14 +727,9 @@ export function patchGuide(guide: unknown): {
     );
     if (home === -1) continue;
     homeBrowseId = browseIdOf(section.items[home]!) ?? null;
-    if (section.items.some((e) => browseIdOf(e) === TRENDS_BROWSE_ID)) continue;
-    section.items.splice(home + 1, 0, {
-      guideEntryRenderer: {
-        navigationEndpoint: { browseEndpoint: { browseId: TRENDS_BROWSE_ID } },
-        icon: { iconType: 'WHATS_HOT' },
-        formattedTitle: { simpleText: 'Тренды' }
-      }
-    } as GuideEntry);
+    if (section.items.some((e) => browseIdOf(e)?.startsWith('FEytaf_')))
+      continue;
+    section.items.splice(home + 1, 0, ...OUR_ENTRIES.map((e) => ({ ...e })));
   }
   return { patched: true, homeBrowseId };
 }

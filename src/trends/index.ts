@@ -1,27 +1,40 @@
 /**
- * Trends, wired into the YouTube TV page:
- * - the guide (left menu) gets "Тренды" and loses movies, games and sports
- *   (JSON.parse hook, like adblock.js);
- * - opening it, or a country in its top row, sends the browse request for a
- *   real page instead (the TV app loads pages over XHR, not fetch) and swaps
- *   that page's contents for shelves built from the Data API `mostPopular`
- *   chart of that country, or of several merged (world, Europe).
+ * Trends and Picks, wired into the YouTube TV page:
+ * - the guide (left menu) gets "Тренды" and "Подборка" and loses movies,
+ *   games and sports (JSON.parse hook, like adblock.js);
+ * - opening one of them, or a country in the Trends top row, sends the
+ *   browse request for a real page instead (the TV app loads pages over XHR,
+ *   not fetch) and swaps that page's contents for our shelves;
+ * - Trends come from the Data API `mostPopular` chart of a country, or of
+ *   several merged (world, Europe); Picks from a search and channel lists
+ *   (sources.ts).
  */
 import { ResolveCommandRegistry } from '../app_api';
 import {
-  groupIntoShelves,
+  buildPicksContents,
+  buildTrendsContents,
+  channelFromApi,
+  isUnwanted,
+  pageRequestOf,
   patchGuide,
+  picksShelf,
   rankAcrossRegions,
   swapBrowseContents,
   toRememberedCountry,
-  trendsRequestOf,
+  topChannelIds,
+  trendingChannels,
+  trendsShelves,
   videoFromApi,
   withCarrier,
+  type ChannelInfo,
+  type PageRequest,
   type RankedVideo,
   type Shelf,
+  type TrendChannel,
   type TrendVideo,
   type TrendsTab
 } from './core';
+import { PICKS, type PicksSource } from './sources';
 
 const REGIONS: Record<TrendsTab, string[]> = {
   world: ['US', 'GB', 'IN', 'BR', 'JP', 'KR', 'MX', 'DE', 'FR', 'ID'],
@@ -31,12 +44,38 @@ const REGIONS: Record<TrendsTab, string[]> = {
   us: ['US']
 };
 
-const FRESH_MS = 3 * 60 * 60 * 1000;
-const STORAGE_PREFIX = 'ytaf-trends-';
+/** A single country is read deeper, so 50 remain after the filters. */
+const PAGES_FOR_ONE_COUNTRY = 3;
+const TRENDING_CHANNELS = 20;
+const TRENDS_FRESH_MS = 3 * 60 * 60 * 1000;
+const PICKS_FRESH_MS = 6 * 60 * 60 * 1000;
 
-const LAST_TAB_KEY = `${STORAGE_PREFIX}last`;
+const STORAGE_PREFIX = 'ytaf-trends-v2-';
+const LAST_TAB_KEY = 'ytaf-trends-last';
 
 let carrierBrowseId = 'FEtopics';
+
+// ---------------------------------------------------------------- storage
+
+function read<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+function write(key: string, value: unknown) {
+  try {
+    localStorage.setItem(
+      key,
+      typeof value === 'string' ? value : JSON.stringify(value)
+    );
+  } catch {
+    // Storage full or blocked: the page still works, it just refetches.
+  }
+}
 
 function rememberedTab(): TrendsTab {
   try {
@@ -48,85 +87,231 @@ function rememberedTab(): TrendsTab {
   return 'world';
 }
 
-function rememberTab(tab: TrendsTab) {
-  try {
-    localStorage.setItem(LAST_TAB_KEY, tab);
-  } catch {
-    // Not remembered; the next open shows the world.
-  }
-}
+// --------------------------------------------------------------- Data API
 
-// ------------------------------------------------------------------ the data
-
-async function fetchRegion(region: string): Promise<TrendVideo[]> {
-  const url =
-    'https://www.googleapis.com/youtube/v3/videos' +
-    '?part=snippet,contentDetails,statistics&chart=mostPopular&maxResults=50&hl=ru' +
-    `&regionCode=${region}&key=${encodeURIComponent(__YTAF_TRENDS_KEY__)}`;
-  const res = await fetch(url);
-  const body = (await res.json()) as {
-    items?: unknown[];
-    error?: { message?: string };
-  };
+async function api<T>(
+  path: string,
+  params: Record<string, string>
+): Promise<T> {
+  const query = Object.keys(params)
+    .map((k) => `${k}=${encodeURIComponent(params[k]!)}`)
+    .join('&');
+  const res = await fetch(
+    `https://www.googleapis.com/youtube/v3/${path}?${query}&key=${encodeURIComponent(__YTAF_TRENDS_KEY__)}`
+  );
+  const body = (await res.json()) as T & { error?: { message?: string } };
   if (!res.ok) throw new Error(body.error?.message ?? `HTTP ${res.status}`);
-  return (body.items ?? [])
-    .map(videoFromApi)
-    .filter((v): v is TrendVideo => v !== null);
+  return body;
 }
 
-type Cached = { at: number; videos: RankedVideo[] };
+type Page = { items?: unknown[]; nextPageToken?: string };
 
-function readCache(tab: TrendsTab): Cached | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + tab);
-    return raw ? (JSON.parse(raw) as Cached) : null;
-  } catch {
-    return null;
+const VIDEO_PARTS = 'snippet,contentDetails,statistics,status';
+
+const toVideos = (items: unknown[] | undefined) =>
+  (items ?? []).map(videoFromApi).filter((v): v is TrendVideo => v !== null);
+
+async function fetchRegion(
+  region: string,
+  pages: number
+): Promise<TrendVideo[]> {
+  const videos: TrendVideo[] = [];
+  let pageToken = '';
+  for (let i = 0; i < pages; i++) {
+    const page = await api<Page>('videos', {
+      part: VIDEO_PARTS,
+      chart: 'mostPopular',
+      maxResults: '50',
+      hl: 'ru',
+      regionCode: region,
+      ...(pageToken ? { pageToken } : {})
+    });
+    videos.push(...toVideos(page.items));
+    if (!page.nextPageToken) break;
+    pageToken = page.nextPageToken;
   }
+  return videos;
 }
 
-function writeCache(tab: TrendsTab, videos: RankedVideo[]) {
-  try {
-    localStorage.setItem(
-      STORAGE_PREFIX + tab,
-      JSON.stringify({ at: Date.now(), videos })
-    );
-  } catch {
-    // Storage full or blocked: the tab still works, it just refetches.
-  }
+async function videosByIds(ids: string[]): Promise<TrendVideo[]> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
+  const pages = await Promise.all(
+    chunks.map((chunk) =>
+      api<Page>('videos', { part: VIDEO_PARTS, id: chunk.join(','), hl: 'ru' })
+    )
+  );
+  return pages.flatMap((p) => toVideos(p.items));
 }
 
-const inFlight = new Map<TrendsTab, Promise<Shelf[] | string>>();
+async function channelsByIds(ids: string[]): Promise<ChannelInfo[]> {
+  if (ids.length === 0) return [];
+  const page = await api<Page>('channels', {
+    part: 'snippet,statistics',
+    id: ids.slice(0, 50).join(',')
+  });
+  return (page.items ?? [])
+    .map(channelFromApi)
+    .filter((c): c is ChannelInfo => c !== null);
+}
 
-/** Shelves for a tab, or the reason there are none. Never rejects. */
-function loadShelves(tab: TrendsTab): Promise<Shelf[] | string> {
-  const cached = readCache(tab);
-  if (cached && Date.now() - cached.at < FRESH_MS) {
-    return Promise.resolve(groupIntoShelves(cached.videos));
-  }
-  const running = inFlight.get(tab);
+// ------------------------------------------------------------------ trends
+
+type CachedTrends = {
+  at: number;
+  videos: RankedVideo[];
+  channels: TrendChannel[];
+};
+
+const inFlight = new Map<string, Promise<Shelf[] | string>>();
+
+/** Runs `load` once at a time per key; never rejects. */
+function once(key: string, load: () => Promise<Shelf[] | string>) {
+  const running = inFlight.get(key);
   if (running) return running;
+  const p = load().catch((err: unknown) =>
+    String((err as Error)?.message ?? err ?? 'Нет данных')
+  );
+  inFlight.set(key, p);
+  void p.then(() => inFlight.delete(key));
+  return p;
+}
 
-  const load = (async (): Promise<Shelf[] | string> => {
+function loadTrends(tab: TrendsTab): Promise<Shelf[] | string> {
+  const key = `${STORAGE_PREFIX}${tab}`;
+  const cached = read<CachedTrends>(key);
+  if (cached && Date.now() - cached.at < TRENDS_FRESH_MS) {
+    return Promise.resolve(trendsShelves(cached.videos, cached.channels));
+  }
+  return once(key, async () => {
     if (!__YTAF_TRENDS_KEY__) return 'В сборке нет ключа YouTube Data API';
-    const results = await Promise.allSettled(REGIONS[tab].map(fetchRegion));
+    const regions = REGIONS[tab];
+    const pages = regions.length === 1 ? PAGES_FOR_ONE_COUNTRY : 1;
+    const results = await Promise.allSettled(
+      regions.map((r) => fetchRegion(r, pages))
+    );
     const lists = results.flatMap((r) =>
-      r.status === 'fulfilled' && r.value.length > 0 ? [r.value] : []
+      r.status === 'fulfilled' && r.value.length > 0
+        ? [r.value.filter((v) => !isUnwanted(v))]
+        : []
     );
-    if (lists.length > 0) {
-      const ranked = rankAcrossRegions(lists);
-      writeCache(tab, ranked);
-      return groupIntoShelves(ranked);
+    if (lists.length === 0) {
+      if (cached) return trendsShelves(cached.videos, cached.channels);
+      const failure = results.find(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
+      return String(
+        failure?.reason?.message ?? failure?.reason ?? 'Нет данных'
+      );
     }
-    if (cached) return groupIntoShelves(cached.videos);
-    const failure = results.find(
-      (r): r is PromiseRejectedResult => r.status === 'rejected'
+    const ranked = rankAcrossRegions(lists);
+    const ids = topChannelIds(ranked, TRENDING_CHANNELS);
+    const infos = await channelsByIds(ids).catch(() => [] as ChannelInfo[]);
+    const channels = trendingChannels(ranked, ids, infos);
+    write(key, { at: Date.now(), videos: ranked, channels });
+    return trendsShelves(ranked, channels);
+  });
+}
+
+// ------------------------------------------------------------------- picks
+
+async function sourceVideos(
+  source: PicksSource,
+  days: number
+): Promise<TrendVideo[]> {
+  const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
+  if ('search' in source) {
+    const found = await api<{ items?: { id?: { videoId?: string } }[] }>(
+      'search',
+      {
+        part: 'id',
+        type: 'video',
+        maxResults: '50',
+        q: source.search,
+        relevanceLanguage: source.language,
+        regionCode: source.region,
+        order: 'viewCount',
+        videoDuration: 'long',
+        publishedAfter: since
+      }
     );
-    return String(failure?.reason?.message ?? failure?.reason ?? 'Нет данных');
-  })();
-  inFlight.set(tab, load);
-  load.finally(() => inFlight.delete(tab));
-  return load;
+    const ids = (found.items ?? []).flatMap((i) =>
+      i.id?.videoId ? [i.id.videoId] : []
+    );
+    return videosByIds(ids);
+  }
+  // A channel's uploads playlist is its id with UC turned into UU.
+  const uploads = await Promise.allSettled(
+    source.channels.map((id) =>
+      api<{
+        items?: {
+          contentDetails?: { videoId?: string; videoPublishedAt?: string };
+        }[];
+      }>('playlistItems', {
+        part: 'contentDetails',
+        maxResults: '15',
+        playlistId: `UU${id.slice(2)}`
+      })
+    )
+  );
+  const ids = uploads.flatMap((r) =>
+    r.status === 'fulfilled'
+      ? (r.value.items ?? []).flatMap((i) => {
+          const c = i.contentDetails;
+          return c?.videoId && (c.videoPublishedAt ?? '') >= since
+            ? [c.videoId]
+            : [];
+        })
+      : []
+  );
+  return videosByIds(ids);
+}
+
+type CachedPicks = { at: number; shelves: Shelf[] };
+
+function loadPicks(): Promise<Shelf[] | string> {
+  const key = `${STORAGE_PREFIX}picks`;
+  const cached = read<CachedPicks>(key);
+  if (cached && Date.now() - cached.at < PICKS_FRESH_MS) {
+    return Promise.resolve(cached.shelves);
+  }
+  return once(key, async () => {
+    if (!__YTAF_TRENDS_KEY__) return 'В сборке нет ключа YouTube Data API';
+    const now = new Date();
+    const rows = await Promise.allSettled(
+      PICKS.map(async (row) =>
+        picksShelf(row, await sourceVideos(row.source, row.days), now)
+      )
+    );
+    const shelves = rows.flatMap((r) =>
+      r.status === 'fulfilled' &&
+      r.value.kind === 'videos' &&
+      r.value.videos.length > 0
+        ? [r.value]
+        : []
+    );
+    if (shelves.length === 0) {
+      if (cached) return cached.shelves;
+      const failure = rows.find(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
+      return String(
+        failure?.reason?.message ?? failure?.reason ?? 'Нет данных'
+      );
+    }
+    write(key, { at: Date.now(), shelves });
+    return shelves;
+  });
+}
+
+/** The `contents` our page shows for a request; never rejects. */
+async function contentsFor(request: PageRequest): Promise<object> {
+  if (request.page === 'picks') {
+    return buildPicksContents(await loadPicks(), new Date());
+  }
+  const tab = request.tab === 'remembered' ? rememberedTab() : request.tab;
+  write(LAST_TAB_KEY, tab);
+  return buildTrendsContents(tab, await loadTrends(tab), new Date());
 }
 
 // ----------------------------------------------------------------- the guide
@@ -143,12 +328,21 @@ JSON.parse = function (...args: Parameters<typeof JSON.parse>) {
     if (homeBrowseId) carrierBrowseId = homeBrowseId;
     if (patched) {
       console.info('[trends] Guide patched, carrier', carrierBrowseId);
-      // Warm the country shown first, so opening Trends is instant.
-      void loadShelves(rememberedTab());
+      // Warm both pages so opening them is instant.
+      void loadTrends(rememberedTab());
+      void loadPicks();
     }
   }
   return r;
 };
+
+void ResolveCommandRegistry.getInstance().then((registry) => {
+  registry.setHook('browseEndpoint', (resolveCommand, payload, extra) => {
+    const rewritten = toRememberedCountry(payload, rememberedTab());
+    if (rewritten) console.info('[trends] Guide entry ->', rewritten);
+    return resolveCommand(rewritten ?? payload, extra);
+  });
+});
 
 // ----------------------------------------------------------------- the pages
 
@@ -172,26 +366,22 @@ proto.send = function (
   const request =
     typeof body === 'string' &&
     this.__ytafTrendsUrl?.includes('/youtubei/v1/browse')
-      ? trendsRequestOf(body)
+      ? pageRequestOf(body)
       : null;
   if (!request || typeof body !== 'string') {
     origSend.call(this, body);
     return;
   }
-  const tab = request === 'remembered' ? rememberedTab() : request;
-  rememberTab(tab);
 
   const xhr = this;
-  void loadShelves(tab).then((shelves) => {
+  void contentsFor(request).then((contents) => {
     let swapped: string | null = null;
     const ours = () => {
       if (swapped === null) {
         const real = textGetter.call(xhr) as string;
         try {
           swapped =
-            xhr.status === 200
-              ? swapBrowseContents(real, tab, shelves, new Date())
-              : real;
+            xhr.status === 200 ? swapBrowseContents(real, contents) : real;
         } catch (err) {
           console.warn(
             '[trends] Could not swap the page, showing the real one',
@@ -216,17 +406,9 @@ proto.send = function (
         return responseGetter.call(xhr);
       }
     });
-    console.info(`[trends] Opening ${tab} through ${carrierBrowseId}`);
+    console.info(
+      `[trends] Opening ${JSON.stringify(request)} through ${carrierBrowseId}`
+    );
     origSend.call(xhr, withCarrier(body, carrierBrowseId));
   });
 };
-
-// ------------------------------------------------------- the guide entry
-
-void ResolveCommandRegistry.getInstance().then((registry) => {
-  registry.setHook('browseEndpoint', (resolveCommand, payload, extra) => {
-    const rewritten = toRememberedCountry(payload, rememberedTab());
-    if (rewritten) console.info('[trends] Guide entry ->', rewritten);
-    return resolveCommand(rewritten ?? payload, extra);
-  });
-});
