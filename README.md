@@ -53,6 +53,8 @@ instead, on every page. ([`src/guide-fit/`](src/guide-fit))
 ### Smaller things
 
 - Movies, Gaming and Sports are hidden from the menu.
+- Trends and Picks speak Russian when YouTube's interface is Russian and English
+  otherwise; video titles are requested in the same language.
 
 ## Building
 
