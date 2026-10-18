@@ -38,8 +38,12 @@ export type Shelf =
   | { kind: 'videos'; title: string; videos: TrendVideo[] }
   | { kind: 'channels'; title: string; channels: TrendChannel[] };
 
-/** One Picks row: how its videos are chosen once fetched. */
+export type PicksCountry = 'all' | 'ru' | 'lv' | 'us';
+
+/** One Picks row: whose it is, and how its videos are chosen once fetched. */
 export type PicksRow = {
+  id: string;
+  country: Exclude<PicksCountry, 'all'>;
   title: string;
   order: 'views' | 'date';
   perChannel: number;
@@ -60,6 +64,15 @@ export const TAB_TITLES: Record<TrendsTab, string> = {
 };
 
 const TAB_IDS = Object.keys(TAB_TITLES) as TrendsTab[];
+
+export const PICKS_TITLES: Record<PicksCountry, string> = {
+  all: 'Все',
+  ru: 'Россия',
+  lv: 'Латвия',
+  us: 'США'
+};
+
+const PICKS_IDS = Object.keys(PICKS_TITLES) as PicksCountry[];
 
 const HIDDEN_BROWSE_IDS = [
   'FEtopics_movies',
@@ -501,31 +514,35 @@ const FLAGS: Record<TrendsTab, string> = {
     ).join('')
 };
 
-export function flagImage(tab: TrendsTab): string {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90">${FLAGS[tab]}</svg>`;
+/** "All" in Picks wears the globe, like the world in Trends. */
+export function flagImage(country: TrendsTab | PicksCountry): string {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90">${FLAGS[country === 'all' ? 'world' : country]}</svg>`;
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-function buildCountryTile(tab: TrendsTab, selected: boolean) {
+function buildCountryTile(
+  country: TrendsTab | PicksCountry,
+  title: string,
+  browseId: string,
+  selected: boolean
+) {
   return {
     tileRenderer: {
       style: 'TILE_STYLE_YTLR_DEFAULT',
       header: {
         tileHeaderRenderer: {
           thumbnail: {
-            thumbnails: [{ url: flagImage(tab), width: 480, height: 270 }]
+            thumbnails: [{ url: flagImage(country), width: 480, height: 270 }]
           }
         }
       },
       metadata: {
         tileMetadataRenderer: {
-          title: text(TAB_TITLES[tab]),
+          title: text(title),
           lines: selected ? [line(text('выбрано'))] : []
         }
       },
-      onSelectCommand: {
-        browseEndpoint: { browseId: `${TRENDS_BROWSE_ID}_${tab}` }
-      },
+      onSelectCommand: { browseEndpoint: { browseId } },
       contentType: 'TILE_CONTENT_TYPE_UNSPECIFIED'
     }
   };
@@ -592,7 +609,9 @@ export function buildTrendsContents(
   const countries = buildShelf(
     'Страна',
     'Выберите, чьи тренды показать',
-    TAB_IDS.map((t) => buildCountryTile(t, t === tab))
+    TAB_IDS.map((t) =>
+      buildCountryTile(t, TAB_TITLES[t], `${TRENDS_BROWSE_ID}_${t}`, t === tab)
+    )
   );
   const rest =
     typeof shelvesOrError === 'string'
@@ -607,23 +626,44 @@ export function buildTrendsContents(
   return page([countries, ...rest]);
 }
 
-/** The `contents` of the Picks page. */
+/** The rows a Picks country shows; "all" shows every row. */
+export function picksRowsFor<T extends { country: string }>(
+  country: PicksCountry,
+  rows: T[]
+): T[] {
+  return country === 'all' ? rows : rows.filter((r) => r.country === country);
+}
+
+/** The `contents` of a Picks page: its own country row, then its rows. */
 export function buildPicksContents(
+  country: PicksCountry,
   shelvesOrError: Shelf[] | string,
   now: Date
 ) {
-  return page(
+  const countries = buildShelf(
+    'Страна',
+    'Выберите страну',
+    PICKS_IDS.map((c) =>
+      buildCountryTile(
+        c,
+        PICKS_TITLES[c],
+        `${PICKS_BROWSE_ID}_${c}`,
+        c === country
+      )
+    )
+  );
+  const rest =
     typeof shelvesOrError === 'string'
       ? [buildShelf('Не удалось загрузить подборку', shelvesOrError, [])]
-      : shelvesOrError.map((s) => renderShelf(s, now))
-  );
+      : shelvesOrError.map((s) => renderShelf(s, now));
+  return page([countries, ...rest]);
 }
 
 // ------------------------------------------------------ requests and guide
 
 export type PageRequest =
   | { page: 'trends'; tab: TrendsTab | 'remembered' }
-  | { page: 'picks' };
+  | { page: 'picks'; country: PicksCountry | 'remembered' };
 
 /** Which of our pages a browse request asks for, if any. */
 export function pageRequestOf(requestBody: string): PageRequest | null {
@@ -631,27 +671,39 @@ export function pageRequestOf(requestBody: string): PageRequest | null {
     requestBody
   );
   if (!m) return null;
-  if (m[1] === 'picks') return m[2] === undefined ? { page: 'picks' } : null;
-  if (m[2] === undefined) return { page: 'trends', tab: 'remembered' };
-  return (TAB_IDS as string[]).includes(m[2])
-    ? { page: 'trends', tab: m[2] as TrendsTab }
+  const [, page, choice] = m;
+  if (page === 'picks') {
+    if (choice === undefined) return { page: 'picks', country: 'remembered' };
+    return (PICKS_IDS as string[]).includes(choice)
+      ? { page: 'picks', country: choice as PicksCountry }
+      : null;
+  }
+  if (choice === undefined) return { page: 'trends', tab: 'remembered' };
+  return (TAB_IDS as string[]).includes(choice)
+    ? { page: 'trends', tab: choice as TrendsTab }
     : null;
 }
 
 /**
- * The TV app caches a page per browse id, so the guide entry would always
+ * The TV app caches a page per browse id, so a guide entry would always
  * show the country it opened first. Its command is therefore rewritten, at
  * the moment it is chosen, into the remembered country's own page.
  */
-export function toRememberedCountry(
+export function toRememberedPage(
   command: Record<string, unknown>,
-  tab: TrendsTab
+  remembered: { trends: TrendsTab; picks: PicksCountry }
 ): Record<string, unknown> | null {
   const browse = command.browseEndpoint as { browseId?: unknown } | undefined;
-  if (browse?.browseId !== TRENDS_BROWSE_ID) return null;
+  const choice =
+    browse?.browseId === TRENDS_BROWSE_ID
+      ? remembered.trends
+      : browse?.browseId === PICKS_BROWSE_ID
+        ? remembered.picks
+        : null;
+  if (choice === null) return null;
   return {
     ...command,
-    browseEndpoint: { ...browse, browseId: `${TRENDS_BROWSE_ID}_${tab}` }
+    browseEndpoint: { ...browse, browseId: `${browse!.browseId}_${choice}` }
   };
 }
 

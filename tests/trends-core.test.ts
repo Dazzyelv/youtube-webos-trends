@@ -16,7 +16,8 @@ import {
   picksShelf,
   rankAcrossRegions,
   swapBrowseContents,
-  toRememberedCountry,
+  picksRowsFor,
+  toRememberedPage,
   topChannelIds,
   trendingChannels,
   trendsShelves,
@@ -302,6 +303,8 @@ test('trending channels: strongest first, with their count of trending videos', 
 test('a picks row drops Shorts, kids, old and repeated videos and caps each channel', () => {
   const now = new Date('2026-10-18T12:00:00Z');
   const row = {
+    id: 'shows',
+    country: 'ru' as const,
     title: 'Шоу',
     order: 'views' as const,
     perChannel: 2,
@@ -336,7 +339,14 @@ test('a picks row drops Shorts, kids, old and repeated videos and caps each chan
 test('a picks row can put the newest first', () => {
   const now = new Date('2026-10-18T12:00:00Z');
   const shelf = picksShelf(
-    { title: 'Новое', order: 'date', perChannel: 5, days: 30 },
+    {
+      id: 'new',
+      country: 'ru',
+      title: 'Новое',
+      order: 'date',
+      perChannel: 5,
+      days: 30
+    },
     [
       video('old', {
         durationSec: 600,
@@ -483,21 +493,62 @@ test('an error page keeps the country row and says what went wrong', () => {
   assert.equal(headerOf(shelves[1]!).subtitle.runs[0]!.text, 'Нет сети');
 });
 
-test('the picks page is its rows, or the reason there are none', () => {
-  const rows = shelvesOf(
+test('a picks page starts with its own country row, then its rows', () => {
+  const shelves = shelvesOf(
     buildPicksContents(
-      [{ kind: 'videos', title: 'Путешествия', videos: [video('p')] }],
+      'lv',
+      [{ kind: 'videos', title: 'Ceļojumi', videos: [video('p')] }],
       new Date()
     )
   );
   assert.deepEqual(
-    rows.map((s) => headerOf(s).title.runs[0]!.text),
-    ['Путешествия']
+    shelves.map((s) => headerOf(s).title.runs[0]!.text),
+    ['Страна', 'Ceļojumi']
   );
-  const [error] = shelvesOf(buildPicksContents('Квота кончилась', new Date()));
-  assert.equal(
-    headerOf(error!).title.runs[0]!.text,
-    'Не удалось загрузить подборку'
+  const tiles = tilesOf(shelves[0]!);
+  assert.deepEqual(
+    tiles.map((t) => t.metadata.tileMetadataRenderer.title.simpleText),
+    ['Все', 'Россия', 'Латвия', 'США']
+  );
+  assert.deepEqual(
+    tiles.map((t) => t.onSelectCommand.browseEndpoint.browseId),
+    [
+      'FEytaf_picks_all',
+      'FEytaf_picks_ru',
+      'FEytaf_picks_lv',
+      'FEytaf_picks_us'
+    ]
+  );
+  assert.deepEqual(
+    tiles.map((t) => JSON.stringify(t).includes('выбрано')),
+    [false, false, true, false]
+  );
+});
+
+test('a picks page without rows keeps the country row and says why', () => {
+  const shelves = shelvesOf(
+    buildPicksContents('us', 'Квота кончилась', new Date())
+  );
+  assert.deepEqual(
+    shelves.map((s) => headerOf(s).title.runs[0]!.text),
+    ['Страна', 'Не удалось загрузить подборку']
+  );
+});
+
+test('a country shows its own rows, All shows every row', () => {
+  const rows = [
+    { id: 'a', country: 'ru' as const },
+    { id: 'b', country: 'lv' as const },
+    { id: 'c', country: 'us' as const },
+    { id: 'd', country: 'lv' as const }
+  ];
+  assert.deepEqual(
+    picksRowsFor('lv', rows).map((r) => r.id),
+    ['b', 'd']
+  );
+  assert.deepEqual(
+    picksRowsFor('all', rows).map((r) => r.id),
+    ['a', 'b', 'c', 'd']
   );
 });
 
@@ -517,8 +568,14 @@ test('a browse request for our pages is recognised, any other is not', () => {
     tab: 'remembered'
   });
   assert.deepEqual(pageRequestOf('{"browseId":"FEytaf_picks"}'), {
-    page: 'picks'
+    page: 'picks',
+    country: 'remembered'
   });
+  assert.deepEqual(pageRequestOf('{"browseId":"FEytaf_picks_lv"}'), {
+    page: 'picks',
+    country: 'lv'
+  });
+  assert.equal(pageRequestOf('{"browseId":"FEytaf_picks_world"}'), null);
   assert.equal(pageRequestOf('{"browseId":"FEytaf_trends_xx"}'), null);
   assert.equal(pageRequestOf('{"browseId":"FEtopics"}'), null);
 });
@@ -548,26 +605,35 @@ test("the real page's contents are swapped for ours, the rest and the prefix kep
   assert.deepEqual(parsed.contents, { ours: true });
 });
 
-test('the Trends entry is sent straight to the remembered country page', () => {
+const remembered = { trends: 'us', picks: 'lv' } as const;
+
+test('the Trends and Picks entries go straight to the remembered country page', () => {
   const command = {
     clickTrackingParams: 'C',
     browseEndpoint: { browseId: 'FEytaf_trends' }
   };
-  assert.deepEqual(toRememberedCountry(command, 'us'), {
+  assert.deepEqual(toRememberedPage(command, remembered), {
     clickTrackingParams: 'C',
     browseEndpoint: { browseId: 'FEytaf_trends_us' }
   });
   assert.equal(command.browseEndpoint.browseId, 'FEytaf_trends');
+  assert.deepEqual(
+    toRememberedPage(
+      { browseEndpoint: { browseId: 'FEytaf_picks' } },
+      remembered
+    ),
+    { browseEndpoint: { browseId: 'FEytaf_picks_lv' } }
+  );
 });
 
 test('any other browse is not rewritten', () => {
-  for (const browseId of ['FEytaf_trends_ru', 'FEytaf_picks', 'FEtopics']) {
+  for (const browseId of ['FEytaf_trends_ru', 'FEytaf_picks_ru', 'FEtopics']) {
     assert.equal(
-      toRememberedCountry({ browseEndpoint: { browseId } }, 'us'),
+      toRememberedPage({ browseEndpoint: { browseId } }, remembered),
       null
     );
   }
-  assert.equal(toRememberedCountry({ watchEndpoint: {} }, 'us'), null);
+  assert.equal(toRememberedPage({ watchEndpoint: {} }, remembered), null);
 });
 
 const guide = () => ({

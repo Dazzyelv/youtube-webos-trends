@@ -60,8 +60,23 @@ const EN_SHOWS = [
   'UCX6OQ3DkcsbYNE6H8uQQuVA' // MrBeast
 ];
 
+const LV_RUSSIAN = [
+  'UCJTnc26yv_zaEJWbzhqHtCQ', // Рижанин по планете
+  'UCbkGcsQKpCfZAn3y9mD8gAg', // Похождения Дэна
+  'UCElI6dzeIICP7jYG8dzq7UQ', // Nikita Riga
+  'UCa3gjArGZZG7VA2YDUITemg', // Lena Aro
+  'UCRidfJtEOquklFG0lCn4pPw', // Veronika's Life
+  'UCLVXxIcDEt7y8P469Rw_8qA', // БАМА TV
+  'UCflzR0bDQ49q2n0L4wH7AoA', // Эрвин и Алина
+  'UCWSckqB8CTKc_m1Du20cY7g', // AlisaLifeStyle
+  'UCT4wLJNdKG11F5fOKoV4g2A' // ForeverTravel
+];
+
+/** In page order; "Все" shows them all, a country only its own. */
 export const PICKS: (PicksRow & { source: PicksSource })[] = [
   {
+    id: 'ru-travel-search',
+    country: 'ru',
     title: 'Путешествия',
     order: 'views',
     perChannel: 2,
@@ -69,6 +84,8 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
     source: { search: 'путешествие', language: 'ru', region: 'RU' }
   },
   {
+    id: 'ru-travel-channels',
+    country: 'ru',
     title: 'Новое на каналах о путешествиях',
     order: 'date',
     perChannel: 3,
@@ -76,6 +93,8 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
     source: { channels: RU_TRAVEL }
   },
   {
+    id: 'ru-shows',
+    country: 'ru',
     title: 'Шоу',
     order: 'views',
     perChannel: 5,
@@ -84,6 +103,35 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
     source: { channels: RU_SHOWS }
   },
   {
+    id: 'lv-travel-search',
+    country: 'lv',
+    title: 'Ceļojumi',
+    order: 'views',
+    perChannel: 3,
+    days: 30,
+    source: { search: 'ceļojums', language: 'lv', region: 'LV' }
+  },
+  {
+    id: 'lv-shows-search',
+    country: 'lv',
+    title: 'Šovi',
+    order: 'views',
+    perChannel: 4,
+    days: 30,
+    source: { search: 'šovs', language: 'lv', region: 'LV' }
+  },
+  {
+    id: 'lv-russian-channels',
+    country: 'lv',
+    title: 'Латвия по-русски',
+    order: 'date',
+    perChannel: 3,
+    days: 30,
+    source: { channels: LV_RUSSIAN }
+  },
+  {
+    id: 'us-travel',
+    country: 'us',
     title: 'Travel',
     order: 'views',
     perChannel: 4,
@@ -91,6 +139,8 @@ export const PICKS: (PicksRow & { source: PicksSource })[] = [
     source: { channels: EN_TRAVEL }
   },
   {
+    id: 'us-shows',
+    country: 'us',
     title: 'Shows',
     order: 'views',
     perChannel: 4,

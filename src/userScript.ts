@@ -30,3 +30,4 @@ import './hooks';
 import './block-webos-cast';
 import './auto-account-select';
 import './trends';
+import './guide-fit';

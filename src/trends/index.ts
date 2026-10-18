@@ -17,10 +17,11 @@ import {
   isUnwanted,
   pageRequestOf,
   patchGuide,
+  picksRowsFor,
   picksShelf,
   rankAcrossRegions,
   swapBrowseContents,
-  toRememberedCountry,
+  toRememberedPage,
   topChannelIds,
   trendingChannels,
   trendsShelves,
@@ -28,6 +29,7 @@ import {
   withCarrier,
   type ChannelInfo,
   type PageRequest,
+  type PicksCountry,
   type RankedVideo,
   type Shelf,
   type TrendChannel,
@@ -52,6 +54,7 @@ const PICKS_FRESH_MS = 6 * 60 * 60 * 1000;
 
 const STORAGE_PREFIX = 'ytaf-trends-v2-';
 const LAST_TAB_KEY = 'ytaf-trends-last';
+const LAST_PICKS_KEY = 'ytaf-picks-last';
 
 let carrierBrowseId = 'FEtopics';
 
@@ -85,6 +88,17 @@ function rememberedTab(): TrendsTab {
     // Blocked storage: fall back to the world.
   }
   return 'world';
+}
+
+function rememberedPicks(): PicksCountry {
+  try {
+    const country = localStorage.getItem(LAST_PICKS_KEY);
+    if (country === 'ru' || country === 'lv' || country === 'us')
+      return country;
+  } catch {
+    // Blocked storage: fall back to all.
+  }
+  return 'all';
 }
 
 // --------------------------------------------------------------- Data API
@@ -267,47 +281,65 @@ async function sourceVideos(
   return videosByIds(ids);
 }
 
-type CachedPicks = { at: number; shelves: Shelf[] };
+type CachedRow = { at: number; shelf: Shelf };
 
-function loadPicks(): Promise<Shelf[] | string> {
-  const key = `${STORAGE_PREFIX}picks`;
-  const cached = read<CachedPicks>(key);
+const rowsInFlight = new Map<string, Promise<Shelf>>();
+
+/** One Picks row, from storage while fresh; rejects when its source fails. */
+function loadPicksRow(row: (typeof PICKS)[number]): Promise<Shelf> {
+  const key = `${STORAGE_PREFIX}row-${row.id}`;
+  const cached = read<CachedRow>(key);
   if (cached && Date.now() - cached.at < PICKS_FRESH_MS) {
-    return Promise.resolve(cached.shelves);
+    return Promise.resolve(cached.shelf);
   }
-  return once(key, async () => {
-    if (!__YTAF_TRENDS_KEY__) return 'В сборке нет ключа YouTube Data API';
-    const now = new Date();
-    const rows = await Promise.allSettled(
-      PICKS.map(async (row) =>
-        picksShelf(row, await sourceVideos(row.source, row.days), now)
-      )
-    );
-    const shelves = rows.flatMap((r) =>
-      r.status === 'fulfilled' &&
-      r.value.kind === 'videos' &&
-      r.value.videos.length > 0
-        ? [r.value]
-        : []
-    );
-    if (shelves.length === 0) {
-      if (cached) return cached.shelves;
-      const failure = rows.find(
-        (r): r is PromiseRejectedResult => r.status === 'rejected'
-      );
-      return String(
-        failure?.reason?.message ?? failure?.reason ?? 'Нет данных'
-      );
+  const running = rowsInFlight.get(key);
+  if (running) return running;
+  const load = sourceVideos(row.source, row.days).then(
+    (videos) => {
+      const shelf = picksShelf(row, videos, new Date());
+      write(key, { at: Date.now(), shelf });
+      return shelf;
+    },
+    (err: unknown) => {
+      if (cached) return cached.shelf;
+      throw err;
     }
-    write(key, { at: Date.now(), shelves });
-    return shelves;
-  });
+  );
+  rowsInFlight.set(key, load);
+  const done = () => rowsInFlight.delete(key);
+  void load.then(done, done);
+  return load;
+}
+
+/** A country's Picks rows, or the reason there are none. Never rejects. */
+async function loadPicks(country: PicksCountry): Promise<Shelf[] | string> {
+  if (!__YTAF_TRENDS_KEY__) return 'В сборке нет ключа YouTube Data API';
+  const rows = await Promise.allSettled(
+    picksRowsFor(country, PICKS).map(loadPicksRow)
+  );
+  const shelves = rows.flatMap((r) =>
+    r.status === 'fulfilled' &&
+    r.value.kind === 'videos' &&
+    r.value.videos.length > 0
+      ? [r.value]
+      : []
+  );
+  if (shelves.length > 0) return shelves;
+  const failure = rows.find(
+    (r): r is PromiseRejectedResult => r.status === 'rejected'
+  );
+  return failure
+    ? String(failure.reason?.message ?? failure.reason)
+    : 'Нет видео';
 }
 
 /** The `contents` our page shows for a request; never rejects. */
 async function contentsFor(request: PageRequest): Promise<object> {
   if (request.page === 'picks') {
-    return buildPicksContents(await loadPicks(), new Date());
+    const country =
+      request.country === 'remembered' ? rememberedPicks() : request.country;
+    write(LAST_PICKS_KEY, country);
+    return buildPicksContents(country, await loadPicks(country), new Date());
   }
   const tab = request.tab === 'remembered' ? rememberedTab() : request.tab;
   write(LAST_TAB_KEY, tab);
@@ -330,7 +362,7 @@ JSON.parse = function (...args: Parameters<typeof JSON.parse>) {
       console.info('[trends] Guide patched, carrier', carrierBrowseId);
       // Warm both pages so opening them is instant.
       void loadTrends(rememberedTab());
-      void loadPicks();
+      void loadPicks(rememberedPicks());
     }
   }
   return r;
@@ -338,7 +370,10 @@ JSON.parse = function (...args: Parameters<typeof JSON.parse>) {
 
 void ResolveCommandRegistry.getInstance().then((registry) => {
   registry.setHook('browseEndpoint', (resolveCommand, payload, extra) => {
-    const rewritten = toRememberedCountry(payload, rememberedTab());
+    const rewritten = toRememberedPage(payload, {
+      trends: rememberedTab(),
+      picks: rememberedPicks()
+    });
     if (rewritten) console.info('[trends] Guide entry ->', rewritten);
     return resolveCommand(rewritten ?? payload, extra);
   });
